@@ -92,6 +92,19 @@ address four seconds later. `path` now returns `APPLE_IROH_ERR_CLOSED` for a
 held connection that has closed, and `apple_iroh_refused` on the other side
 counts what it turned away.
 
+### Which path is carrying the bytes (v0.5.0)
+
+`apple_iroh_path` reports which addresses are **open**, and iroh keeps the
+relay path open after a direct one lands, so "relay and direct" is the normal
+state of a healthy connection, not an upgrade still under way. A Mac dialling
+an iPhone on one network read that way for 305 seconds and never read direct
+alone.
+
+`apple_iroh_selected` reports the path the connection is **sending on**, and
+its round-trip estimate in microseconds. Between two processes on one Mac,
+`path` returned 3 (both open) while `selected` returned 2 (direct), at 402 µs
+and then 95 µs.
+
 ### Timing a pull (v0.4.0)
 
 `apple_iroh_pull` asks a held connection's remote for bytes and counts what

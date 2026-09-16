@@ -67,6 +67,13 @@ int32_t apple_iroh_connect(const char *id_hex);
  * list, which a successful connect does not rule out. */
 int32_t apple_iroh_path(const char *id_hex);
 
+/* Which path the held connection is SENDING on: APPLE_IROH_PATH_RELAY or
+ * APPLE_IROH_PATH_DIRECT, or 0 when none is selected. apple_iroh_path reports
+ * open addresses, and relay and direct are usually both open; this is where the
+ * bytes go. rtt_us (nullable) gets that path's round-trip estimate in
+ * microseconds. APPLE_IROH_ERR_NO_REMOTE when no connection is held. (v0.5.0) */
+int32_t apple_iroh_selected(const char *id_hex, int32_t *rtt_us);
+
 /* The relay carrying this remote, or zero bytes written when none is active. */
 int32_t apple_iroh_relay(const char *id_hex, char *buf, int32_t cap);
 

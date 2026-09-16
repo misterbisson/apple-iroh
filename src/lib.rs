@@ -470,6 +470,46 @@ pub extern "C" fn apple_iroh_path(id_hex: *const c_char) -> i32 {
     flags
 }
 
+/// **Which path the held connection is sending on**: `PATH_RELAY`,
+/// `PATH_DIRECT`, or zero when none is selected.
+///
+/// `apple_iroh_path` reports which addresses are *open*, and both are open for
+/// most of a healthy session: iroh keeps the relay path up after a direct one
+/// lands. Measured on a Mac dialling an iPhone on one network: 305 s of
+/// "relay and direct" and never direct alone, so the address view cannot say
+/// where the bytes went. The connection's selected path can.
+///
+/// `rtt_us`, when not null, gets that path's round-trip estimate in
+/// microseconds — microseconds because a LAN's is under a millisecond.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_selected(id_hex: *const c_char, rtt_us: *mut i32) -> i32 {
+    if endpoint().is_none() {
+        return ERR_NOT_STARTED;
+    }
+    let Some(id) = parse_id(id_hex) else {
+        return ERR_BAD_ID;
+    };
+    let Some(conn) = held(&id) else {
+        return ERR_NO_REMOTE;
+    };
+    if conn.close_reason().is_some() {
+        return ERR_CLOSED;
+    }
+    let paths = conn.paths();
+    for path in paths.iter() {
+        if !path.is_selected() {
+            continue;
+        }
+        if !rtt_us.is_null() {
+            let micros = path.rtt().as_micros().min(i32::MAX as u128) as i32;
+            // SAFETY: non-null, checked here.
+            unsafe { *rtt_us = micros };
+        }
+        return if path.is_relay() { PATH_RELAY } else { PATH_DIRECT };
+    }
+    0
+}
+
 /// The relay carrying this remote, or zero bytes written when none is active.
 #[unsafe(no_mangle)]
 pub extern "C" fn apple_iroh_relay(id_hex: *const c_char, buf: *mut c_char, cap: i32) -> i32 {
