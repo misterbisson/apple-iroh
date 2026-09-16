@@ -123,7 +123,7 @@ on its own schedule and when the network changes, so polling it shows the
 network moving. Built with iroh's `unstable-net-report` feature, whose API is
 outside iroh's semver promise; the exact pin is what holds it still.
 
-On a Mac on a studio network, polled every second: `0` for the first three
+On the Mac that built v0.6.0, polled every second: `0` for the first three
 seconds, then `udp4 1, udp6 0, varies4 0, varies6 -1, public4 1, public6 0,
 captive -1, relay 18271 µs`.
 
