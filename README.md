@@ -105,6 +105,28 @@ its round-trip estimate in microseconds. Between two processes on one Mac,
 `path` returned 3 (both open) while `selected` returned 2 (direct), at 402 µs
 and then 95 µs.
 
+### What iroh learned about the network (v0.6.0)
+
+`apple_iroh_net_report` writes the endpoint's last net report as eight
+integers. It says whether UDP gets out over IPv4 and IPv6, and whether the
+public address **changes with the server asked**, which is the NAT behaviour
+that makes a hole punch hardest. It also says whether a public IPv4 or IPv6
+address was seen, whether a captive portal is suspected, and gives the round
+trip to the preferred relay. Tri-states are `-1` unknown, `0` no, `1` yes.
+
+**No address crosses the boundary**, only whether one was seen. A reading
+gets pasted into a ticket, and the finding is whether a public address exists,
+not which one it is.
+
+It returns `0` until iroh finishes its first report. iroh re-runs the report
+on its own schedule and when the network changes, so polling it shows the
+network moving. Built with iroh's `unstable-net-report` feature, whose API is
+outside iroh's semver promise; the exact pin is what holds it still.
+
+On a Mac on a studio network, polled every second: `0` for the first three
+seconds, then `udp4 1, udp6 0, varies4 0, varies6 -1, public4 1, public6 0,
+captive -1, relay 18271 µs`.
+
 ### Timing a pull (v0.4.0)
 
 `apple_iroh_pull` asks a held connection's remote for bytes and counts what

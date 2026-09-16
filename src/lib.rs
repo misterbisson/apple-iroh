@@ -533,6 +533,71 @@ pub extern "C" fn apple_iroh_relay(id_hex: *const c_char, buf: *mut c_char, cap:
     0
 }
 
+/// Slots `apple_iroh_net_report` writes, in order. Tri-states are `-1`
+/// unknown, `0` no, `1` yes.
+pub const NET_UDP_V4: usize = 0;
+pub const NET_UDP_V6: usize = 1;
+pub const NET_VARIES_V4: usize = 2;
+pub const NET_VARIES_V6: usize = 3;
+pub const NET_PUBLIC_V4: usize = 4;
+pub const NET_PUBLIC_V6: usize = 5;
+pub const NET_CAPTIVE: usize = 6;
+pub const NET_RELAY_US: usize = 7;
+pub const NET_FIELDS: i32 = 8;
+
+/// **What iroh last learned about the network this endpoint is on**, as eight
+/// integers: whether UDP gets out over IPv4 and IPv6, whether the public
+/// address changes with the server asked (the NAT behaviour that makes a hole
+/// punch hardest), whether a public IPv4 and IPv6 address was seen, whether a
+/// captive portal is suspected, and the round trip to the preferred relay in
+/// microseconds (`-1` if none).
+///
+/// Returns `NET_FIELDS` when a report exists, `0` when iroh has not finished
+/// its first one, `ERR_BUFFER` when `cap` is short. **The addresses themselves
+/// never cross**: a reading gets pasted into a ticket, and whether a public
+/// address exists is the finding, not which one it is.
+///
+/// iroh re-runs the report on its own schedule and when the network changes, so
+/// polling this is how a caller sees the network move.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_net_report(fields: *mut i32, cap: i32) -> i32 {
+    let Some(endpoint) = endpoint() else {
+        return ERR_NOT_STARTED;
+    };
+    if fields.is_null() || cap < NET_FIELDS {
+        return ERR_BUFFER;
+    }
+    let mut watcher = endpoint.net_report();
+    let Some(report) = iroh::Watcher::get(&mut watcher) else {
+        return 0;
+    };
+    let tri = |value: Option<bool>| match value {
+        None => -1,
+        Some(false) => 0,
+        Some(true) => 1,
+    };
+    let relay = report.preferred_relay.as_ref().and_then(|url| {
+        report
+            .relay_latency
+            .iter()
+            .filter(|(_, seen, _)| *seen == url)
+            .map(|(_, _, latency)| latency)
+            .min()
+    });
+    let mut out = [0i32; NET_FIELDS as usize];
+    out[NET_UDP_V4] = report.udp_v4 as i32;
+    out[NET_UDP_V6] = report.udp_v6 as i32;
+    out[NET_VARIES_V4] = tri(report.mapping_varies_by_dest_ipv4);
+    out[NET_VARIES_V6] = tri(report.mapping_varies_by_dest_ipv6);
+    out[NET_PUBLIC_V4] = report.global_v4.is_some() as i32;
+    out[NET_PUBLIC_V6] = report.global_v6.is_some() as i32;
+    out[NET_CAPTIVE] = tri(report.captive_portal);
+    out[NET_RELAY_US] = relay.map_or(-1, |d| d.as_micros().min(i32::MAX as u128) as i32);
+    // SAFETY: non-null with at least NET_FIELDS of capacity, checked above.
+    unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), fields, NET_FIELDS as usize) };
+    NET_FIELDS
+}
+
 /// Drops every held connection and the endpoint.
 ///
 /// The tokio runtime is deliberately **not** torn down: it is a `OnceLock` for

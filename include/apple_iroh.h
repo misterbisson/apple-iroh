@@ -102,6 +102,23 @@ int32_t apple_iroh_refused(void);
 int32_t apple_iroh_pull(const char *id_hex, int32_t duration_ms, int32_t interval_ms,
                         uint64_t *samples, int32_t cap, int32_t *first_byte_ms);
 
+/* What iroh last learned about this endpoint's network, as APPLE_IROH_NET_FIELDS
+ * int32 slots at the indices below. Tri-states are -1 unknown, 0 no, 1 yes.
+ * Returns APPLE_IROH_NET_FIELDS when a report exists, 0 before iroh's first
+ * report, APPLE_IROH_ERR_BUFFER when cap is short. No address crosses: only
+ * whether one was seen. iroh re-runs the report when the network changes, so
+ * poll it to see the network move. (v0.6.0) */
+#define APPLE_IROH_NET_UDP_V4     (0)
+#define APPLE_IROH_NET_UDP_V6     (1)
+#define APPLE_IROH_NET_VARIES_V4  (2) /* public address differs by server asked */
+#define APPLE_IROH_NET_VARIES_V6  (3)
+#define APPLE_IROH_NET_PUBLIC_V4  (4) /* a public address was seen */
+#define APPLE_IROH_NET_PUBLIC_V6  (5)
+#define APPLE_IROH_NET_CAPTIVE    (6)
+#define APPLE_IROH_NET_RELAY_US   (7) /* round trip to preferred relay, -1 none */
+#define APPLE_IROH_NET_FIELDS     (8)
+int32_t apple_iroh_net_report(int32_t *fields, int32_t cap);
+
 /* Drops every held connection and the endpoint. */
 void apple_iroh_stop(void);
 

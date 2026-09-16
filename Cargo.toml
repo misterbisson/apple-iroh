@@ -15,7 +15,10 @@ path = "src/lib.rs"
 # Pinned exactly. The artifact this repo publishes is a binary somebody else
 # builds against, so "whatever resolves today" is not a dependency spec — a
 # caller pinning our tag has to get the same iroh every time.
-iroh = "=1.2.0"
+# `unstable-net-report` for `apple_iroh_net_report`: the probe results iroh
+# already takes to decide how to reach the internet. Unstable upstream, which is
+# one more reason the version is pinned exactly.
+iroh = { version = "=1.2.0", features = ["unstable-net-report"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
 
 [profile.release]
