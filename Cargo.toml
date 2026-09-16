@@ -1,0 +1,27 @@
+[package]
+name = "apple-iroh"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "iroh as a static library for Apple platforms, with a C ABI"
+repository = "https://github.com/misterbisson/apple-iroh"
+
+[lib]
+name = "apple_iroh"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Pinned exactly. The artifact this repo publishes is a binary somebody else
+# builds against, so "whatever resolves today" is not a dependency spec — a
+# caller pinning our tag has to get the same iroh every time.
+iroh = "=1.2.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+
+[profile.release]
+# The consumer is an app binary. Size is the thing being traded for here.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = false

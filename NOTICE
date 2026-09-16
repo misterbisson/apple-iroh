@@ -1,0 +1,20 @@
+apple-iroh
+Copyright (c) 2026 Casey Bisson
+Licensed under the MIT License. See LICENSE.
+
+The published artifact, AppleIroh.xcframework, is a static library. It contains
+compiled code from third-party crates whose licences travel with it.
+
+iroh — https://github.com/n0-computer/iroh
+    Licensed under either of Apache License 2.0 or MIT, at the user's option.
+    iroh itself ships a LICENSE-BSD3 that is an attribution rather than its
+    licence: parts of its socket code are derived from Tailscale
+    (https://github.com/tailscale/tailscale), BSD-3-Clause.
+
+tokio — https://github.com/tokio-rs/tokio
+    MIT.
+
+The full dependency set, pinned, is Cargo.lock. `cargo tree` over that lock
+enumerates every crate compiled into the artifact, and `cargo about` or an
+equivalent will produce the complete licence manifest for a distribution that
+needs one.

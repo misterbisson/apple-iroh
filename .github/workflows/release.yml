@@ -1,0 +1,66 @@
+name: release
+
+# Tag-driven, because the artifact is the product. A commit on main changes the
+# source; a tag says "this is the one somebody should pin", and the two are not
+# the same event.
+on:
+  push:
+    tags: ["v*"]
+  # So a branch can be checked before it is tagged. Builds, and publishes
+  # nothing.
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  xcframework:
+    # A macOS runner, which is the whole reason this repo is separate and
+    # public: Xcode is needed for -create-xcframework and for the iOS SDKs, and
+    # macOS minutes are free here in a way they are not on a private repo.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the Apple targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin
+
+      # Reported rather than assumed. The binary is built by whatever these
+      # say, and a release whose provenance does not name them is a release
+      # nobody can reproduce.
+      - name: Say what is building this
+        run: |
+          rustc --version
+          cargo --version
+          xcodebuild -version
+          sw_vers
+
+      - name: Build
+        run: ./build-xcframework.sh
+
+      - name: Checksum, where a person reading the log can see it
+        run: |
+          echo "sha256: $(cat build/AppleIroh.xcframework.zip.sha256)"
+          echo "bytes:  $(stat -f%z build/AppleIroh.xcframework.zip)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AppleIroh.xcframework
+          path: |
+            build/AppleIroh.xcframework.zip
+            build/AppleIroh.xcframework.zip.sha256
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/AppleIroh.xcframework.zip
+            build/AppleIroh.xcframework.zip.sha256
+          body: |
+            `AppleIroh.xcframework.zip` — static slices for `ios-arm64`,
+            `ios-arm64-simulator` and `macos-arm64`.
+
+            Pin the checksum in `AppleIroh.xcframework.zip.sha256`, not just the
+            tag. A tag can be moved; a checksum cannot.
