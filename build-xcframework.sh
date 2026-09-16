@@ -43,6 +43,28 @@ xcodebuild -create-xcframework \
 	-library "target/aarch64-apple-darwin/release/libapple_iroh.a" -headers include \
 	-output build/AppleIroh.xcframework >/dev/null
 
+# **`-create-xcframework` shuffles its own index**, so sort it.
+#
+# Diagnosed rather than guessed: two CI runs of one commit produced
+# byte-identical `libapple_iroh.a` for all three slices and different zips. The
+# difference was `Info.plist` — xcodebuild writes `AvailableLibraries` in
+# whatever order it happens to finish, so the same three slices came out
+# macos/sim/ios one run and sim/macos/ios the next.
+#
+# The order carries no meaning: Xcode picks a slice by matching platform and
+# architecture, never by position. Sorting by `LibraryIdentifier` changes
+# nothing a consumer can observe, and makes the artifact a function of its
+# inputs.
+python3 - build/AppleIroh.xcframework/Info.plist <<'PLIST'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    plist = plistlib.load(handle)
+plist["AvailableLibraries"].sort(key=lambda lib: lib["LibraryIdentifier"])
+with open(path, "wb") as handle:
+    plistlib.dump(plist, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+PLIST
+
 # **Normalise before zipping, or the checksum is a timestamp.**
 #
 # Measured, not assumed: two CI runs of the same commit with the same pinned

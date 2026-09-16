@@ -118,13 +118,23 @@ would silently move a recorded measurement. A bump means: merge, tag, release,
 and then whoever pins it re-pins and re-measures anything that depended on the
 old one.
 
-**The build is reproducible for a given Xcode, and that took two fixes.**
-`rust-toolchain.toml` pins the compiler — a laptop build and a CI build of one
-commit differed on rustc version alone. That was not enough: two CI runs of the
-same commit on the same pinned toolchain *still* differed, because a zip records
-each file's modification time and those are when the build ran. So
-`build-xcframework.sh` normalises timestamps and member order before zipping.
-Either fix alone leaves a checksum that changes when nothing changed.
+**The build is reproducible for a given Xcode, and getting there took three
+fixes, each found by measuring rather than reasoning.**
+
+1. `rust-toolchain.toml` pins the compiler. A laptop build and a CI build of one
+   commit differed on rustc version alone.
+2. The zip records each file's modification time, and those are when the build
+   ran. `build-xcframework.sh` normalises them and adds members in sorted order.
+3. **`xcodebuild -create-xcframework` writes its own index in a
+   nondeterministic order.** Two CI runs of one commit produced *byte-identical*
+   `libapple_iroh.a` for all three slices and different zips; the whole
+   difference was `Info.plist` listing the same three slices as macos/sim/ios
+   one run and sim/macos/ios the next. The order carries no meaning — Xcode
+   matches a slice on platform and architecture, never position — so the script
+   sorts `AvailableLibraries` by `LibraryIdentifier`.
+
+Each fix alone leaves a checksum that changes when nothing changed, which cannot
+verify anything.
 
 **Xcode is deliberately not pinned.** SDK moves get fixed in code rather than
 frozen out, which is a standing rule in the consuming project. So a reproduction
