@@ -12,9 +12,25 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# `macosx` is not in this list: the Mac slice is the host build, and the
-# deployment target is set per-slice below.
-TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin)
+# **Five Rust targets, three xcframework slices**, because a slice may be
+# universal and a Rust build never is.
+#
+# The consuming Mac app builds `ARCHS = arm64 x86_64` in Release — that is
+# Xcode's default for a macOS app and what it ships — so an arm64-only archive
+# fails at link on the x86_64 arm. It does not fail in Debug, where
+# `ONLY_ACTIVE_ARCH` builds the host architecture alone, which is how an
+# arm64-only v0.1.1 passed every local build and failed the first Release one.
+#
+# The Simulator slice is universal for the same reason one step removed: the
+# Simulator runs the host architecture, so an Intel Mac needs `x86_64-apple-ios`
+# to run the app at all.
+#
+# The device slice is not, and cannot be: there has never been an x86_64 iPhone.
+TARGETS=(
+	aarch64-apple-ios
+	aarch64-apple-ios-sim x86_64-apple-ios
+	aarch64-apple-darwin x86_64-apple-darwin
+)
 
 # Matched to the consuming app's floors. Raising either is a breaking change
 # for a consumer that has not raised its own, so it is a version bump here.
@@ -35,12 +51,30 @@ for target in "${TARGETS[@]}"; do
 	echo "$(stat -f%z "target/$target/release/libapple_iroh.a") bytes"
 done
 
+# **`lipo` the pairs.** `-create-xcframework` will not take two archives for one
+# platform — it refuses with "binaries with the same platform and architecture"
+# — so the universal slices are made here and handed over as one file each.
+fat() {
+	local out=$1; shift
+	mkdir -p "$(dirname "$out")"
+	lipo -create "$@" -output "$out"
+	printf '%-26s%s bytes  %s\n' "$(basename "$(dirname "$out")")" \
+		"$(stat -f%z "$out")" "$(lipo -archs "$out")"
+}
+
+fat build/fat/ios-simulator/libapple_iroh.a \
+	target/aarch64-apple-ios-sim/release/libapple_iroh.a \
+	target/x86_64-apple-ios/release/libapple_iroh.a
+fat build/fat/macos/libapple_iroh.a \
+	target/aarch64-apple-darwin/release/libapple_iroh.a \
+	target/x86_64-apple-darwin/release/libapple_iroh.a
+
 # One headers directory shared by all three slices. `-create-xcframework`
 # copies it per slice rather than referencing it, so there is no aliasing here.
 xcodebuild -create-xcframework \
 	-library "target/aarch64-apple-ios/release/libapple_iroh.a" -headers include \
-	-library "target/aarch64-apple-ios-sim/release/libapple_iroh.a" -headers include \
-	-library "target/aarch64-apple-darwin/release/libapple_iroh.a" -headers include \
+	-library "build/fat/ios-simulator/libapple_iroh.a" -headers include \
+	-library "build/fat/macos/libapple_iroh.a" -headers include \
 	-output build/AppleIroh.xcframework >/dev/null
 
 # **`-create-xcframework` shuffles its own index**, so sort it.
@@ -76,6 +110,7 @@ PLIST
 # `touch` to a fixed instant, then `-X` to drop the Mac's extra attributes, and
 # `find | sort` so members go in every time in the same order rather than in
 # whatever order the filesystem hands them over.
+rm -rf build/fat
 find build/AppleIroh.xcframework -exec touch -h -t 200001010000 {} +
 (cd build && find AppleIroh.xcframework -print | sort | zip -qry -X AppleIroh.xcframework.zip -@)
 shasum -a 256 build/AppleIroh.xcframework.zip | awk '{print $1}' > build/AppleIroh.xcframework.zip.sha256

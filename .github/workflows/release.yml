@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the channel and the three targets, so this is
+      # rust-toolchain.toml pins the channel and the five targets, so this is
       # just making rustup act on it rather than on the runner's default.
       - name: Install the pinned toolchain
         run: rustup show active-toolchain
@@ -62,7 +62,9 @@ jobs:
             build/AppleIroh.xcframework.zip.sha256
           body: |
             `AppleIroh.xcframework.zip` — static slices for `ios-arm64`,
-            `ios-arm64-simulator` and `macos-arm64`.
+            `ios-arm64_x86_64-simulator` and `macos-arm64_x86_64`. The last two
+            are universal: Xcode builds a Mac app `ARCHS = arm64 x86_64` in
+            Release, and the Simulator runs the host's architecture.
 
             Pin the checksum in `AppleIroh.xcframework.zip.sha256`, not just the
             tag. A tag can be moved; a checksum cannot.

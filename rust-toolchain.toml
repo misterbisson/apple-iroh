@@ -15,4 +15,15 @@
 # release notes say which one built each artifact.
 [toolchain]
 channel = "1.98.1"
-targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim", "aarch64-apple-darwin"]
+# Five Rust targets, three xcframework slices. The Simulator and macOS slices
+# are `lipo`d universal because the consuming app builds universal in Release —
+# `ARCHS = arm64 x86_64` — and a Mac app that links an arm64-only archive fails
+# at link on the x86_64 arm, in the Release configuration nobody builds locally.
+# Found that way, on the one command that reproduces what Xcode Cloud does.
+targets = [
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]

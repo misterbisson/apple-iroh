@@ -4,8 +4,14 @@
 platforms, behind a small C ABI.**
 
 One tagged release publishes `AppleIroh.xcframework.zip` with three slices —
-`ios-arm64`, `ios-arm64-simulator`, `macos-arm64` — and the header to call
-them. An app fetches the zip, checks the sha256, and links it.
+`ios-arm64`, `ios-arm64_x86_64-simulator`, `macos-arm64_x86_64` — and the header
+to call them. An app fetches the zip, checks the sha256, and links it.
+
+Two of the three are universal, from v0.2.0. Xcode builds a Mac app
+`ARCHS = arm64 x86_64` in Release by default, and the Simulator runs the host's
+architecture, so an arm64-only archive fails at link the first time somebody
+builds Release or opens the Simulator on an Intel Mac. v0.1.1 was arm64-only and
+did exactly that.
 
 ## Why this is its own repository
 
@@ -97,15 +103,20 @@ the consumer is an app binary and size is what is being traded for.
 
 | | |
 |---|---|
-| `libapple_iroh.a`, per slice | ~14.0 MB |
-| `AppleIroh.xcframework` | 40 MB |
-| `AppleIroh.xcframework.zip` | **12.8 MB** |
+| `libapple_iroh.a`, one architecture | ~14.0 MB |
+| `libapple_iroh.a`, universal slice | ~28 MB |
+| `AppleIroh.xcframework` | 67 MB |
+| `AppleIroh.xcframework.zip` | **21.5 MB** |
+
+The zip was 12.8 MB at v0.1.1, when every slice was arm64 alone. Carrying
+x86\_64 for macOS and the Simulator is what the other 8.7 MB is.
 
 What an app *gains* is smaller than the archive, because the linker drops what
 nothing references. Measured separately against a trivial `main`, linked and
 stripped: **17,347,264 bytes** for `ios-arm64`, 17,350,040 for the simulator
 and 17,670,936 for `macos-arm64` — that build being iroh's own default profile
-rather than the size-tuned one here.
+rather than the size-tuned one here, and measured at v0.1.1 against the
+arm64-only slices. An app that ships universal pays roughly twice that.
 
 ## Versions
 
