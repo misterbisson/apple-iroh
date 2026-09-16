@@ -26,6 +26,7 @@ extern "C" {
 #define APPLE_IROH_ERR_NO_REMOTE       (-7)
 #define APPLE_IROH_ERR_BAD_KEY         (-8)
 #define APPLE_IROH_ERR_CLOSED          (-9)
+#define APPLE_IROH_ERR_STREAM          (-10)
 
 /* A secret key is exactly this many bytes. */
 #define APPLE_IROH_SECRET_KEY_LEN      (32)
@@ -79,6 +80,20 @@ void apple_iroh_allow_none(void);
 /* Incoming connections refused because their id was not allowed. Tells "nobody
  * arrived" apart from "somebody arrived and was turned away". */
 int32_t apple_iroh_refused(void);
+
+/* Times bytes arriving from a held connection's remote for duration_ms, and
+ * writes how many arrived in each interval_ms into samples, which needs room
+ * for ceil(duration_ms / interval_ms). Returns the intervals covered: fewer
+ * than that means the stream ended early, and the rest were NOT measured.
+ * first_byte_ms (nullable) gets ms from asking to the first byte, or -1.
+ *
+ * The remote answers with zeros until the reader stops, so the reading is the
+ * path and not a disk. Both ends answer pulls. BLOCKS for the duration — sample
+ * apple_iroh_path from another thread meanwhile, because a figure without the
+ * path that carried it means nothing. Needs v0.4.0 at both ends; the protocol
+ * name changed so an older endpoint fails to connect rather than never answer. */
+int32_t apple_iroh_pull(const char *id_hex, int32_t duration_ms, int32_t interval_ms,
+                        uint64_t *samples, int32_t cap, int32_t *first_byte_ms);
 
 /* Drops every held connection and the endpoint. */
 void apple_iroh_stop(void);

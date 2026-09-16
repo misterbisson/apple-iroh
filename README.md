@@ -92,6 +92,28 @@ address four seconds later. `path` now returns `APPLE_IROH_ERR_CLOSED` for a
 held connection that has closed, and `apple_iroh_refused` on the other side
 counts what it turned away.
 
+### Timing a pull (v0.4.0)
+
+`apple_iroh_pull` asks a held connection's remote for bytes and counts what
+arrives in each interval. The remote answers with zeros until the reader stops
+the stream, so the figure is the path and not a disk behind it, and QUIC's
+encryption means nothing on the way can compress them. Both ends answer, so
+either direction can be timed.
+
+**Sample the path while it runs.** A throughput figure without the path that
+carried it cannot be read: relayed and direct are different products.
+
+**An interval with nothing in it is a reading, not an absence.** Measured
+between two processes on one Mac: the serving process was killed with
+`SIGKILL` part-way through a five-second pull, and the pull still reported all
+ten intervals covered, the last four at zero bytes. A peer that vanishes
+without closing looks like a stall until QUIC's idle timeout, and no stream can
+tell the two apart sooner. A pull that ends because the other side closed
+returns fewer intervals than it asked for.
+
+The protocol name moved to `apple-iroh/probe/1`, so a v0.3.0 endpoint and a
+v0.4.0 endpoint fail to connect rather than connect and never answer a pull.
+
 ## Consuming it
 
 ```bash

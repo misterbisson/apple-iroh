@@ -29,15 +29,21 @@
 use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::runtime::Runtime;
+use tokio::time::Instant;
 
 /// The protocol name two endpoints have to agree on before QUIC will talk.
 /// Versioned from the start: a v0 endpoint meeting a v1 endpoint should fail to
 /// negotiate rather than half-work.
-const ALPN: &[u8] = b"apple-iroh/probe/0";
+///
+/// `/1` since v0.4.0, which added the pull stream: a v0.3.0 endpoint accepts a
+/// connection and then never answers a pull, and "the other side is too old"
+/// should not read as "the network carries nothing".
+const ALPN: &[u8] = b"apple-iroh/probe/1";
 
 pub const ERR_NOT_STARTED: i32 = -1;
 pub const ERR_ALREADY_STARTED: i32 = -2;
@@ -51,6 +57,16 @@ pub const ERR_BAD_KEY: i32 = -8;
 /// The held connection to this remote has closed — refused by the other side,
 /// timed out, or dropped.
 pub const ERR_CLOSED: i32 = -9;
+/// A pull could not open its stream, or the stream failed before a byte came.
+pub const ERR_STREAM: i32 = -10;
+
+/// What a dialler writes on a new bidirectional stream to ask for bytes.
+const PULL_REQUEST: &[u8] = b"pull";
+/// **How long one pull is served, at most.** The reader stops the stream when
+/// it has timed enough; this is only what ends a stream whose reader went
+/// away without saying so.
+const SERVE_LIMIT: Duration = Duration::from_secs(120);
+const CHUNK: usize = 64 * 1024;
 
 /// Length of a secret key, in bytes.
 pub const SECRET_KEY_LEN: i32 = 32;
@@ -237,12 +253,141 @@ fn held_closed(id: &EndpointId) -> bool {
 }
 
 fn remember(id: EndpointId, conn: Connection) {
+    serve(conn.clone());
     let mut held = match DIALLED.lock() {
         Ok(held) => held,
         Err(poisoned) => poisoned.into_inner(),
     };
     held.retain(|(known, _)| *known != id);
     held.push((id, conn));
+}
+
+fn held(id: &EndpointId) -> Option<Connection> {
+    let held = match DIALLED.lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    held.iter().find(|(known, _)| known == id).map(|(_, conn)| conn.clone())
+}
+
+/// **Answers pulls on a held connection**, from either end.
+///
+/// A pull is a bidirectional stream carrying `pull`; the answer is zeros, in
+/// 64 KiB writes, until the reader stops the stream. Zeros because what is
+/// being timed is the path and nothing behind it: a file would put this Mac's
+/// disk in the reading, and QUIC encrypts every byte, so nothing on the way
+/// can compress them.
+///
+/// Both ends serve, so either can time the other direction. Only connections
+/// that got past the allow list, or that this side dialled, are ever held.
+fn serve(conn: Connection) {
+    runtime().spawn(async move {
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+            tokio::spawn(async move {
+                match recv.read_to_end(16).await {
+                    Ok(request) if request == PULL_REQUEST => {}
+                    _ => return,
+                }
+                let chunk = vec![0u8; CHUNK];
+                let _ = tokio::time::timeout(SERVE_LIMIT, async {
+                    while send.write_all(&chunk).await.is_ok() {}
+                })
+                .await;
+                let _ = send.finish();
+            });
+        }
+    });
+}
+
+/// **Times bytes arriving from `id_hex`** for `duration_ms`, and writes how
+/// many arrived in each `interval_ms` into `samples`.
+///
+/// Returns the number of intervals the pull covered. Fewer than
+/// `ceil(duration_ms / interval_ms)` means the stream ended early — the other
+/// side stopped serving, or the connection went — and the intervals after it
+/// were not measured, which is not the same as nothing arriving in them.
+///
+/// `first_byte_ms`, when not null, gets the milliseconds from asking to the
+/// first byte, or -1 if none came.
+///
+/// **Blocks** for the duration. The path can be sampled from another thread
+/// while it runs, and should be: a throughput figure means nothing without
+/// the path that carried it.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_pull(
+    id_hex: *const c_char,
+    duration_ms: i32,
+    interval_ms: i32,
+    samples: *mut u64,
+    cap: i32,
+    first_byte_ms: *mut i32,
+) -> i32 {
+    if endpoint().is_none() {
+        return ERR_NOT_STARTED;
+    }
+    let Some(id) = parse_id(id_hex) else {
+        return ERR_BAD_ID;
+    };
+    if duration_ms <= 0 || interval_ms <= 0 || samples.is_null() {
+        return ERR_BUFFER;
+    }
+    let slots = ((duration_ms + interval_ms - 1) / interval_ms) as usize;
+    if cap < 0 || (cap as usize) < slots {
+        return ERR_BUFFER;
+    }
+    let Some(conn) = held(&id) else {
+        return ERR_NO_REMOTE;
+    };
+    if conn.close_reason().is_some() {
+        return ERR_CLOSED;
+    }
+    let interval = interval_ms as u128;
+    let pulled = runtime().block_on(async move {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|_| ERR_STREAM)?;
+        send.write_all(PULL_REQUEST).await.map_err(|_| ERR_STREAM)?;
+        send.finish().map_err(|_| ERR_STREAM)?;
+        let began = Instant::now();
+        let deadline = began + Duration::from_millis(duration_ms as u64);
+        let mut buckets = vec![0u64; slots];
+        let mut first = -1i32;
+        let mut buf = vec![0u8; CHUNK];
+        let mut covered = slots;
+        loop {
+            match tokio::time::timeout_at(deadline, recv.read(&mut buf)).await {
+                Err(_) => break,
+                Ok(Ok(Some(n))) => {
+                    let at = began.elapsed().as_millis();
+                    if first < 0 {
+                        first = at as i32;
+                    }
+                    let slot = ((at / interval) as usize).min(slots - 1);
+                    buckets[slot] += n as u64;
+                }
+                Ok(Ok(None)) | Ok(Err(_)) => {
+                    if first < 0 {
+                        return Err(ERR_STREAM);
+                    }
+                    let at = began.elapsed().as_millis();
+                    covered = (at.div_ceil(interval) as usize).min(slots);
+                    break;
+                }
+            }
+        }
+        let _ = recv.stop(0u32.into());
+        Ok((buckets, first, covered))
+    });
+    match pulled {
+        Ok((buckets, first, covered)) => {
+            // SAFETY: non-null with at least `slots` of capacity, checked above.
+            unsafe { std::ptr::copy_nonoverlapping(buckets.as_ptr(), samples, slots) };
+            if !first_byte_ms.is_null() {
+                // SAFETY: non-null, checked here.
+                unsafe { *first_byte_ms = first };
+            }
+            covered as i32
+        }
+        Err(code) => code,
+    }
 }
 
 fn endpoint() -> Option<Endpoint> {
