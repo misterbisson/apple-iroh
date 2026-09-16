@@ -43,11 +43,19 @@ xcodebuild -create-xcframework \
 	-library "target/aarch64-apple-darwin/release/libapple_iroh.a" -headers include \
 	-output build/AppleIroh.xcframework >/dev/null
 
-# `-X` drops the extra attribute files that make a zip built on a Mac differ
-# from the same bytes zipped anywhere else. The checksum below is what a
-# consumer pins, so a zip that changes without its contents changing would be a
-# false alarm every time.
-(cd build && zip -qry -X AppleIroh.xcframework.zip AppleIroh.xcframework)
+# **Normalise before zipping, or the checksum is a timestamp.**
+#
+# Measured, not assumed: two CI runs of the same commit with the same pinned
+# rustc produced different checksums — 7ffbc109... and 505d4468... — because a
+# zip records each file's modification time, and those are when the build ran.
+# A checksum that changes when nothing changed cannot be used to verify
+# anything.
+#
+# `touch` to a fixed instant, then `-X` to drop the Mac's extra attributes, and
+# `find | sort` so members go in every time in the same order rather than in
+# whatever order the filesystem hands them over.
+find build/AppleIroh.xcframework -exec touch -h -t 200001010000 {} +
+(cd build && find AppleIroh.xcframework -print | sort | zip -qry -X AppleIroh.xcframework.zip -@)
 shasum -a 256 build/AppleIroh.xcframework.zip | awk '{print $1}' > build/AppleIroh.xcframework.zip.sha256
 
 echo

@@ -1,10 +1,12 @@
-# Pinned so the same source gives the same bytes.
+# Pinned so a new compiler cannot change the artifact without anybody deciding
+# to.
 #
-# The first CI build produced a different checksum from the same commit built on
-# a laptop — 12,837,365 bytes against 12,808,323 — because the two had different
-# rustc versions. That is expected, and it is also the difference between "this
-# checksum identifies the artifact" and "this checksum can be re-derived from
-# the source", which is the stronger claim and the one worth having.
+# A laptop build and the first CI build of the same commit differed —
+# 12,808,323 bytes against 12,837,365 — on rustc version alone. Pinning removes
+# that. It was NOT by itself enough to make the build reproducible: two CI runs
+# of one commit on this pinned toolchain still differed, because the zip records
+# modification times. `build-xcframework.sh` normalises those; this file and
+# that step are both needed and neither is sufficient.
 #
 # Xcode is deliberately NOT pinned. That is a standing rule in the consuming
 # project: no Xcode version gate, locally or in CI, because SDK moves are
