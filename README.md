@@ -118,6 +118,13 @@ would silently move a recorded measurement. A bump means: merge, tag, release,
 and then whoever pins it re-pins and re-measures anything that depended on the
 old one.
 
+`rust-toolchain.toml` pins the compiler, so the same commit gives the same
+bytes. It is not a claim of bit-for-bit reproducibility across everything: the
+first CI build differed from a laptop build of the same commit purely on rustc
+version, and **Xcode is deliberately not pinned** — SDK moves get fixed in code
+rather than frozen out. So a reproduction is exact for a given Xcode, and each
+release records which one built it.
+
 `IOS_MIN` and `MACOS_MIN` in `build-xcframework.sh` are the deployment floors.
 Raising either breaks a consumer that has not raised its own, so it is a version
 bump here.
