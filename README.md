@@ -46,8 +46,13 @@ fleet. Both treat the relay as a correctness floor and never as the path the
 bytes should take.
 
 ```c
-int32_t apple_iroh_start(void);
+int32_t apple_iroh_start(void);                                   /* new key each call */
+int32_t apple_iroh_start_with_secret(const uint8_t *key, int32_t len);  /* stable id */
+int32_t apple_iroh_secret_key(uint8_t *buf, int32_t cap);
 int32_t apple_iroh_endpoint_id(char *buf, int32_t cap);
+int32_t apple_iroh_allow(const char *id_hex);     /* list starts empty */
+void    apple_iroh_allow_none(void);
+int32_t apple_iroh_refused(void);
 int32_t apple_iroh_connect(const char *id_hex);   /* blocks */
 int32_t apple_iroh_path(const char *id_hex);      /* RELAY | DIRECT */
 int32_t apple_iroh_relay(const char *id_hex, char *buf, int32_t cap);
@@ -66,6 +71,26 @@ yes".
 Conventions across the boundary are in `include/apple_iroh.h`. In short: every
 call returns `int32_t`, negative is an error code, nothing panics across the
 line, ids are 64 hex characters, and string-out functions refuse to truncate.
+
+### Identity and who may connect (v0.3.0)
+
+**An endpoint's id is the public half of its secret key.** `apple_iroh_start`
+makes a new key every call, so the id changes on every launch — fine on one
+desk, useless when an iPad leaves the house carrying the Mac's id. Keep the key
+from `apple_iroh_secret_key`, on that device only, and pass it back to
+`apple_iroh_start_with_secret`.
+
+**Nobody may connect in until they are allowed.** The allow list starts empty
+and empty means nobody. QUIC's handshake already proves *who* is connecting —
+the id is a public key — but not whether they are welcome, and a listener
+that was never configured should fail closed rather than open.
+
+**A refused dialler finds out from `path`, not from `connect`.** Measured
+between two processes: the refused side's `connect` returned 0, and without a
+check on the connection itself `path` went on reporting an active relay
+address four seconds later. `path` now returns `APPLE_IROH_ERR_CLOSED` for a
+held connection that has closed, and `apple_iroh_refused` on the other side
+counts what it turned away.
 
 ## Consuming it
 

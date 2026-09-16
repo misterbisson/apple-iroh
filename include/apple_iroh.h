@@ -24,15 +24,31 @@ extern "C" {
 #define APPLE_IROH_ERR_CONNECT         (-5)
 #define APPLE_IROH_ERR_BUFFER          (-6)
 #define APPLE_IROH_ERR_NO_REMOTE       (-7)
+#define APPLE_IROH_ERR_BAD_KEY         (-8)
+#define APPLE_IROH_ERR_CLOSED          (-9)
+
+/* A secret key is exactly this many bytes. */
+#define APPLE_IROH_SECRET_KEY_LEN      (32)
 
 /* Path flags. A bitmask, not an enum: both can be true at once, and that state
  * is a relay connection in the middle of upgrading to a direct one. */
 #define APPLE_IROH_PATH_RELAY  (1)
 #define APPLE_IROH_PATH_DIRECT (2)
 
-/* Binds an endpoint and starts accepting. Accepting matters even on a side that
- * only dials, because hole punching is two-sided. */
+/* Binds an endpoint and starts accepting — from ids on the allow list only.
+ * Accepting matters even on a side that only dials, because hole punching is
+ * two-sided. Generates a new key, and so a new id, every call. */
 int32_t apple_iroh_start(void);
+
+/* Binds under a caller-kept secret key, so the endpoint id is the same on every
+ * launch. The id is the public half of the key; apple_iroh_start generates a
+ * new key, and so a new id, every time. len must be APPLE_IROH_SECRET_KEY_LEN. */
+int32_t apple_iroh_start_with_secret(const uint8_t *key, int32_t len);
+
+/* Writes the running endpoint's 32-byte secret key, and returns 32. Whoever
+ * holds these bytes can answer as this endpoint: keep them where only this
+ * device can read them. */
+int32_t apple_iroh_secret_key(uint8_t *buf, int32_t cap);
 
 /* Writes this endpoint's id, 64 hex characters. */
 int32_t apple_iroh_endpoint_id(char *buf, int32_t cap);
@@ -45,11 +61,24 @@ int32_t apple_iroh_connect(const char *id_hex);
 /* How the connection is currently carried: APPLE_IROH_PATH_RELAY |
  * APPLE_IROH_PATH_DIRECT. Zero means the remote is known with no address in
  * active use; APPLE_IROH_ERR_NO_REMOTE means it has never been heard of, which
- * is a different thing while a dial is in flight. */
+ * is a different thing while a dial is in flight. APPLE_IROH_ERR_CLOSED means
+ * the held connection has closed — including refused by the other side's allow
+ * list, which a successful connect does not rule out. */
 int32_t apple_iroh_path(const char *id_hex);
 
 /* The relay carrying this remote, or zero bytes written when none is active. */
 int32_t apple_iroh_relay(const char *id_hex, char *buf, int32_t cap);
+
+/* Who may connect in. The list starts EMPTY, and empty means nobody: an
+ * endpoint that was never told whom to accept refuses everyone. Dials out are
+ * not checked against it — a dial names its remote and the handshake proves
+ * the remote is that one. */
+int32_t apple_iroh_allow(const char *id_hex);
+void apple_iroh_allow_none(void);
+
+/* Incoming connections refused because their id was not allowed. Tells "nobody
+ * arrived" apart from "somebody arrived and was turned away". */
+int32_t apple_iroh_refused(void);
 
 /* Drops every held connection and the endpoint. */
 void apple_iroh_stop(void);

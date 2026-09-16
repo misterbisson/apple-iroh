@@ -27,10 +27,11 @@
 //!   different endpoint id.
 
 use std::ffi::{c_char, CStr};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use iroh::endpoint::{presets, Connection};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::runtime::Runtime;
 
 /// The protocol name two endpoints have to agree on before QUIC will talk.
@@ -45,6 +46,14 @@ pub const ERR_BAD_ID: i32 = -4;
 pub const ERR_CONNECT: i32 = -5;
 pub const ERR_BUFFER: i32 = -6;
 pub const ERR_NO_REMOTE: i32 = -7;
+/// A secret key that is not exactly 32 bytes.
+pub const ERR_BAD_KEY: i32 = -8;
+/// The held connection to this remote has closed — refused by the other side,
+/// timed out, or dropped.
+pub const ERR_CLOSED: i32 = -9;
+
+/// Length of a secret key, in bytes.
+pub const SECRET_KEY_LEN: i32 = 32;
 
 /// Path flags, returned by [`apple_iroh_path`] as a bitmask.
 ///
@@ -62,6 +71,23 @@ static ENDPOINT: Mutex<Option<Endpoint>> = Mutex::new(None);
 /// connection that has been dropped tells you nothing about how it was carried.
 static DIALLED: Mutex<Vec<(EndpointId, Connection)>> = Mutex::new(Vec::new());
 
+/// **Who may connect in.** Empty means nobody.
+///
+/// Deny by default, deliberately. The endpoint id is a public key and QUIC's
+/// handshake proves the other side holds its secret, so *who* is connecting is
+/// already settled cryptographically — what iroh does not decide is whether
+/// that someone is welcome. An open accept loop is how a listener ships open,
+/// and "the caller forgot to configure it" should fail closed.
+///
+/// Outgoing dials are not checked against this: a dial names its remote, and
+/// the handshake refuses anyone who is not that remote.
+static ALLOWED: Mutex<Vec<EndpointId>> = Mutex::new(Vec::new());
+
+/// Incoming connections closed because their id was not allowed. Counted so a
+/// side that sees no connection can tell "nobody arrived" from "somebody
+/// arrived and was turned away" — two very different things to debug.
+static REFUSED: AtomicI32 = AtomicI32::new(0);
+
 fn runtime() -> &'static Runtime {
     RT.get_or_init(|| {
         Runtime::new().expect("apple-iroh: could not build a tokio runtime")
@@ -74,6 +100,51 @@ fn runtime() -> &'static Runtime {
 /// two-sided, and an endpoint that will not accept cannot be punched to.
 #[unsafe(no_mangle)]
 pub extern "C" fn apple_iroh_start() -> i32 {
+    start(None)
+}
+
+/// Binds an endpoint **under a key the caller kept**, and starts accepting.
+///
+/// The endpoint id is the public half of the secret key, so an endpoint started
+/// with [`apple_iroh_start`] has a new id every time. That is fine for two
+/// endpoints on one desk and useless for the case this exists for: a Mac left
+/// at home and an iPad in a café, where the id the iPad carried out of the door
+/// has to still be the Mac's id when it dials. So the app keeps the key — in
+/// the keychain, on that device only — and hands it back here on every launch.
+///
+/// `len` must be exactly [`SECRET_KEY_LEN`]; anything else is `ERR_BAD_KEY`
+/// rather than a key silently derived from the wrong bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_start_with_secret(key: *const u8, len: i32) -> i32 {
+    if key.is_null() || len != SECRET_KEY_LEN {
+        return ERR_BAD_KEY;
+    }
+    let mut bytes = [0u8; 32];
+    // SAFETY: non-null and exactly 32 bytes, checked above.
+    bytes.copy_from_slice(unsafe { std::slice::from_raw_parts(key, 32) });
+    start(Some(SecretKey::from_bytes(&bytes)))
+}
+
+/// Writes this endpoint's 32-byte secret key, so a caller that started with
+/// [`apple_iroh_start`] can keep the key it was given and reuse it.
+///
+/// Returns 32. **The caller now holds the thing that is this endpoint's
+/// identity**: whoever has these bytes can answer as it.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_secret_key(buf: *mut u8, cap: i32) -> i32 {
+    let Some(endpoint) = endpoint() else {
+        return ERR_NOT_STARTED;
+    };
+    if buf.is_null() || cap < SECRET_KEY_LEN {
+        return ERR_BUFFER;
+    }
+    let bytes = endpoint.secret_key().to_bytes();
+    // SAFETY: non-null and at least 32 bytes of capacity, checked above.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, 32) };
+    SECRET_KEY_LEN
+}
+
+fn start(secret: Option<SecretKey>) -> i32 {
     let mut slot = match ENDPOINT.lock() {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
@@ -82,10 +153,12 @@ pub extern "C" fn apple_iroh_start() -> i32 {
         return ERR_ALREADY_STARTED;
     }
     let built = runtime().block_on(async {
-        Endpoint::builder(presets::N0)
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await
+        let builder = Endpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]);
+        let builder = match secret {
+            Some(secret) => builder.secret_key(secret),
+            None => builder,
+        };
+        builder.bind().await
     });
     let endpoint = match built {
         Ok(endpoint) => endpoint,
@@ -101,7 +174,12 @@ pub extern "C" fn apple_iroh_start() -> i32 {
             tokio::spawn(async move {
                 if let Ok(conn) = incoming.await {
                     let id = conn.remote_id();
-                    remember(id, conn);
+                    if is_allowed(&id) {
+                        remember(id, conn);
+                    } else {
+                        REFUSED.fetch_add(1, Ordering::Relaxed);
+                        conn.close(1u32.into(), b"not allowed");
+                    }
                 }
             });
         }
@@ -109,6 +187,53 @@ pub extern "C" fn apple_iroh_start() -> i32 {
 
     *slot = Some(endpoint);
     0
+}
+
+fn allowed() -> std::sync::MutexGuard<'static, Vec<EndpointId>> {
+    match ALLOWED.lock() {
+        Ok(list) => list,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn is_allowed(id: &EndpointId) -> bool {
+    allowed().contains(id)
+}
+
+/// Lets one remote connect in. Idempotent.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_allow(id_hex: *const c_char) -> i32 {
+    let Some(id) = parse_id(id_hex) else {
+        return ERR_BAD_ID;
+    };
+    let mut list = allowed();
+    if !list.contains(&id) {
+        list.push(id);
+    }
+    0
+}
+
+/// Empties the allow list, so nobody new can connect in. Connections already
+/// accepted are left alone; call `apple_iroh_stop` to drop those.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_allow_none() {
+    allowed().clear();
+}
+
+/// How many incoming connections have been refused since the library loaded.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_refused() -> i32 {
+    REFUSED.load(Ordering::Relaxed)
+}
+
+fn held_closed(id: &EndpointId) -> bool {
+    let held = match DIALLED.lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    held.iter()
+        .find(|(known, _)| known == id)
+        .is_some_and(|(_, conn)| conn.close_reason().is_some())
 }
 
 fn remember(id: EndpointId, conn: Connection) {
@@ -175,6 +300,14 @@ pub extern "C" fn apple_iroh_path(id_hex: *const c_char) -> i32 {
     let Some(id) = parse_id(id_hex) else {
         return ERR_BAD_ID;
     };
+    // **A closed connection first, before the addresses.** Measured: a dialler
+    // refused by the other side's allow list got `connect -> 0`, and four
+    // seconds later `remote_info` still listed an active relay address, so this
+    // reported "relayed" for a connection that no longer existed. Addresses say
+    // how a remote *could* be reached; only the connection says whether it is.
+    if held_closed(&id) {
+        return ERR_CLOSED;
+    }
     let Some(info) = runtime().block_on(endpoint.remote_info(id)) else {
         return ERR_NO_REMOTE;
     };
