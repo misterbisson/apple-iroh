@@ -105,6 +105,22 @@ its round-trip estimate in microseconds. Between two processes on one Mac,
 `path` returned 3 (both open) while `selected` returned 2 (direct), at 402 µs
 and then 95 µs.
 
+### What kind of address the bytes use (v0.8.0)
+
+`apple_iroh_selected_addr` says what sort of address the selected path uses,
+at both ends: relay, loopback, private (RFC 1918 or IPv6 `fc00::/7`), link-local,
+shared (`100.64/10`: carrier-grade NAT, and also the range Tailscale assigns),
+or public. `APPLE_IROH_ADDR_V6` is added for an IPv6 address. It never gives the
+address itself.
+
+It exists because "direct" did not say enough. An iPad and a Mac on the same
+Wi-Fi went direct in 0.56 s and read a 30 ms round trip, with a VPN on the
+iPad. Nothing could tell whether the bytes crossed the LAN, went through the
+tunnel, or went out to the public address and back.
+
+Between two processes on the Mac that built v0.8.0: relay at both ends for the
+first second, then direct with a private address at both ends.
+
 ### What iroh learned about the network (v0.6.0)
 
 `apple_iroh_net_report` writes the endpoint's last net report as eight
@@ -196,7 +212,7 @@ v0.4.0 endpoint fail to connect rather than connect and never answer a pull.
 ## Consuming it
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.8.0
 curl -fsSL -O "https://github.com/misterbisson/apple-iroh/releases/download/$VERSION/AppleIroh.xcframework.zip"
 curl -fsSL -O "https://github.com/misterbisson/apple-iroh/releases/download/$VERSION/AppleIroh.xcframework.zip.sha256"
 shasum -a 256 -c <(echo "$(cat AppleIroh.xcframework.zip.sha256)  AppleIroh.xcframework.zip")

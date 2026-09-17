@@ -75,6 +75,20 @@ int32_t apple_iroh_path(const char *id_hex);
  * microseconds. APPLE_IROH_ERR_NO_REMOTE when no connection is held. (v0.5.0) */
 int32_t apple_iroh_selected(const char *id_hex, int32_t *rtt_us);
 
+/* What KIND of address the selected path uses, at each end: remote_kind for
+ * where bytes are sent, local_kind for this device's address on that path
+ * (either nullable). A kind, never the address. Returns what apple_iroh_selected
+ * returns; with nothing selected both kinds are APPLE_IROH_ADDR_UNKNOWN. (v0.8.0) */
+#define APPLE_IROH_ADDR_UNKNOWN    (0)
+#define APPLE_IROH_ADDR_RELAY      (1)
+#define APPLE_IROH_ADDR_LOOPBACK   (2)
+#define APPLE_IROH_ADDR_PRIVATE    (3)  /* RFC 1918, or IPv6 fc00::/7 */
+#define APPLE_IROH_ADDR_LINK_LOCAL (4)  /* 169.254/16, or fe80::/10 */
+#define APPLE_IROH_ADDR_SHARED     (5)  /* 100.64/10: CGNAT, and Tailscale's range */
+#define APPLE_IROH_ADDR_PUBLIC     (6)
+#define APPLE_IROH_ADDR_V6         (16) /* added to a kind for an IPv6 address */
+int32_t apple_iroh_selected_addr(const char *id_hex, int32_t *remote_kind, int32_t *local_kind);
+
 /* The relay carrying this remote, or zero bytes written when none is active. */
 int32_t apple_iroh_relay(const char *id_hex, char *buf, int32_t cap);
 

@@ -728,6 +728,126 @@ pub extern "C" fn apple_iroh_selected(id_hex: *const c_char, rtt_us: *mut i32) -
     0
 }
 
+/// Address kinds, from [`apple_iroh_selected_addr`]. A kind, never the
+/// address: a reading is pasted into a ticket, and the finding is what sort of
+/// address carried the bytes — a LAN, a tunnel's shared range, the public
+/// internet — not which one.
+pub const ADDR_UNKNOWN: i32 = 0;
+pub const ADDR_RELAY: i32 = 1;
+pub const ADDR_LOOPBACK: i32 = 2;
+/// RFC 1918 IPv4, or an IPv6 unique local address (fc00::/7).
+pub const ADDR_PRIVATE: i32 = 3;
+/// 169.254/16 or fe80::/10.
+pub const ADDR_LINK_LOCAL: i32 = 4;
+/// 100.64/10: carrier-grade NAT, and also the range Tailscale assigns.
+pub const ADDR_SHARED: i32 = 5;
+pub const ADDR_PUBLIC: i32 = 6;
+/// Added to a kind when the address is IPv6.
+pub const ADDR_V6: i32 = 16;
+
+fn ip_kind(ip: std::net::IpAddr) -> i32 {
+    use std::net::IpAddr;
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            if v4.is_loopback() {
+                ADDR_LOOPBACK
+            } else if v4.is_private() {
+                ADDR_PRIVATE
+            } else if v4.is_link_local() {
+                ADDR_LINK_LOCAL
+            } else if a == 100 && (64..128).contains(&b) {
+                ADDR_SHARED
+            } else if v4.is_unspecified() {
+                ADDR_UNKNOWN
+            } else {
+                ADDR_PUBLIC
+            }
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            let kind = if v6.is_loopback() {
+                ADDR_LOOPBACK
+            } else if first & 0xfe00 == 0xfc00 {
+                ADDR_PRIVATE
+            } else if first & 0xffc0 == 0xfe80 {
+                ADDR_LINK_LOCAL
+            } else if v6.is_unspecified() {
+                ADDR_UNKNOWN
+            } else {
+                ADDR_PUBLIC
+            };
+            kind + ADDR_V6
+        }
+    }
+}
+
+/// **What kind of address the selected path uses, at each end** (v0.8.0).
+///
+/// `remote_kind` gets the kind of the address bytes are sent to, and
+/// `local_kind` the kind of this device's address on that path; either may be
+/// null. Returns the same as [`apple_iroh_selected`]: `PATH_RELAY`,
+/// `PATH_DIRECT`, or zero when nothing is selected, with both kinds left at
+/// `ADDR_UNKNOWN`.
+///
+/// Built because a direct path on one Wi-Fi read a 30 ms round trip, and
+/// nothing could say whether it crossed the LAN, a VPN tunnel, or went out to
+/// the public address and back.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_selected_addr(
+    id_hex: *const c_char,
+    remote_kind: *mut i32,
+    local_kind: *mut i32,
+) -> i32 {
+    if endpoint().is_none() {
+        return ERR_NOT_STARTED;
+    }
+    let Some(id) = parse_id(id_hex) else {
+        return ERR_BAD_ID;
+    };
+    let Some(conn) = held(&id) else {
+        return ERR_NO_REMOTE;
+    };
+    if conn.close_reason().is_some() {
+        return ERR_CLOSED;
+    }
+    let mut remote = ADDR_UNKNOWN;
+    let mut local = ADDR_UNKNOWN;
+    let mut selected = 0;
+    for path in conn.paths().iter() {
+        if !path.is_selected() {
+            continue;
+        }
+        if path.is_relay() {
+            selected = PATH_RELAY;
+            remote = ADDR_RELAY;
+            local = ADDR_RELAY;
+        } else {
+            selected = PATH_DIRECT;
+            if let iroh::TransportAddr::Ip(addr) = path.remote_addr() {
+                remote = ip_kind(addr.ip());
+            }
+            if let iroh::endpoint::LocalTransportAddr::Ip(Some(ip)) = path.local_addr() {
+                local = ip_kind(*ip);
+            }
+        }
+        break;
+    }
+    if !remote_kind.is_null() {
+        // SAFETY: non-null, checked here.
+        unsafe { *remote_kind = remote };
+    }
+    if !local_kind.is_null() {
+        // SAFETY: non-null, checked here.
+        unsafe { *local_kind = local };
+    }
+    selected
+}
+
 /// The relay carrying this remote, or zero bytes written when none is active.
 #[unsafe(no_mangle)]
 pub extern "C" fn apple_iroh_relay(id_hex: *const c_char, buf: *mut c_char, cap: i32) -> i32 {
@@ -882,4 +1002,34 @@ fn write_out(text: &str, buf: *mut c_char, cap: i32) -> i32 {
     }
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len()) };
     bytes.len() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(text: &str) -> i32 {
+        ip_kind(text.parse().unwrap())
+    }
+
+    #[test]
+    fn address_kinds_by_range() {
+        assert_eq!(kind("127.0.0.1"), ADDR_LOOPBACK);
+        assert_eq!(kind("192.168.1.20"), ADDR_PRIVATE);
+        assert_eq!(kind("10.0.0.4"), ADDR_PRIVATE);
+        assert_eq!(kind("172.31.255.1"), ADDR_PRIVATE);
+        assert_eq!(kind("172.32.0.1"), ADDR_PUBLIC);
+        assert_eq!(kind("169.254.3.3"), ADDR_LINK_LOCAL);
+        assert_eq!(kind("100.64.0.1"), ADDR_SHARED);
+        assert_eq!(kind("100.127.255.254"), ADDR_SHARED);
+        assert_eq!(kind("100.128.0.1"), ADDR_PUBLIC);
+        assert_eq!(kind("100.63.255.255"), ADDR_PUBLIC);
+        assert_eq!(kind("8.8.8.8"), ADDR_PUBLIC);
+        assert_eq!(kind("::1"), ADDR_LOOPBACK + ADDR_V6);
+        assert_eq!(kind("fd7a:115c:a1e0::1"), ADDR_PRIVATE + ADDR_V6);
+        assert_eq!(kind("fe80::1"), ADDR_LINK_LOCAL + ADDR_V6);
+        assert_eq!(kind("2001:db8::1"), ADDR_PUBLIC + ADDR_V6);
+        // A v4 address carried in v6 form is the v4 address.
+        assert_eq!(kind("::ffff:192.168.1.20"), ADDR_PRIVATE);
+    }
 }
