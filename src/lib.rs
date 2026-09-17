@@ -27,13 +27,16 @@
 //!   different endpoint id.
 
 use std::ffi::{c_char, CStr};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use iroh::endpoint::{presets, Connection};
+use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 /// The protocol name two endpoints have to agree on before QUIC will talk.
@@ -59,9 +62,16 @@ pub const ERR_BAD_KEY: i32 = -8;
 pub const ERR_CLOSED: i32 = -9;
 /// A pull could not open its stream, or the stream failed before a byte came.
 pub const ERR_STREAM: i32 = -10;
+/// A port outside 0–65535, or a loopback listener that could not be bound.
+pub const ERR_PORT: i32 = -11;
 
 /// What a dialler writes on a new bidirectional stream to ask for bytes.
 const PULL_REQUEST: &[u8] = b"pull";
+/// What a forwarder writes first on a stream it wants piped to the other side's
+/// exposed port (v0.7.0). The same length as `pull`, so one read of four bytes
+/// tells the two apart — and a v0.6.0 endpoint, which reads to the end and
+/// compares with `pull`, drops the stream rather than answering it wrongly.
+const FORWARD_REQUEST: &[u8] = b"fwd1";
 /// **How long one pull is served, at most.** The reader stops the stream when
 /// it has timed enough; this is only what ends a stream whose reader went
 /// away without saying so.
@@ -103,6 +113,31 @@ static ALLOWED: Mutex<Vec<EndpointId>> = Mutex::new(Vec::new());
 /// side that sees no connection can tell "nobody arrived" from "somebody
 /// arrived and was turned away" — two very different things to debug.
 static REFUSED: AtomicI32 = AtomicI32::new(0);
+
+/// The loopback port forwarded streams are piped to; zero exposes nothing.
+static EXPOSED: AtomicI32 = AtomicI32::new(0);
+
+/// Loopback listeners this side opened with `apple_iroh_forward`, one per
+/// remote, so asking again hands back the same port.
+static FORWARDS: Mutex<Vec<(EndpointId, u16, JoinHandle<()>)>> = Mutex::new(Vec::new());
+
+/// **What forwarding has carried**, at the `CARRIED_*` indices. Counted in the
+/// library because an instrument has to show that it was in the path: a player
+/// that plays from somewhere else looks exactly like one playing over iroh.
+pub const CARRIED_FORWARD_STREAMS: usize = 0;
+pub const CARRIED_FORWARD_FAILED: usize = 1;
+pub const CARRIED_FORWARD_SENT: usize = 2;
+pub const CARRIED_FORWARD_RECEIVED: usize = 3;
+pub const CARRIED_EXPOSE_STREAMS: usize = 4;
+pub const CARRIED_EXPOSE_FAILED: usize = 5;
+pub const CARRIED_EXPOSE_SENT: usize = 6;
+pub const CARRIED_EXPOSE_RECEIVED: usize = 7;
+pub const CARRIED_FIELDS: usize = 8;
+static CARRIED: [AtomicU64; CARRIED_FIELDS] = [const { AtomicU64::new(0) }; CARRIED_FIELDS];
+
+fn count(slot: usize, by: u64) {
+    CARRIED[slot].fetch_add(by, Ordering::Relaxed);
+}
 
 fn runtime() -> &'static Runtime {
     RT.get_or_init(|| {
@@ -180,6 +215,9 @@ fn start(secret: Option<SecretKey>) -> i32 {
         Ok(endpoint) => endpoint,
         Err(_) => return ERR_BIND,
     };
+    for slot in &CARRIED {
+        slot.store(0, Ordering::Relaxed);
+    }
 
     // Accept in the background and hold whatever arrives. The probe has no
     // protocol yet; what it needs is that a connection exists and stays up so
@@ -270,7 +308,7 @@ fn held(id: &EndpointId) -> Option<Connection> {
     held.iter().find(|(known, _)| known == id).map(|(_, conn)| conn.clone())
 }
 
-/// **Answers pulls on a held connection**, from either end.
+/// **Answers pulls and forwards on a held connection**, from either end.
 ///
 /// A pull is a bidirectional stream carrying `pull`; the answer is zeros, in
 /// 64 KiB writes, until the reader stops the stream. Zeros because what is
@@ -278,15 +316,25 @@ fn held(id: &EndpointId) -> Option<Connection> {
 /// disk in the reading, and QUIC encrypts every byte, so nothing on the way
 /// can compress them.
 ///
+/// A forward is a stream opening with `fwd1`, piped both ways to the loopback
+/// port this side exposed, or dropped when it exposed none.
+///
 /// Both ends serve, so either can time the other direction. Only connections
 /// that got past the allow list, or that this side dialled, are ever held.
 fn serve(conn: Connection) {
     runtime().spawn(async move {
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             tokio::spawn(async move {
-                match recv.read_to_end(16).await {
-                    Ok(request) if request == PULL_REQUEST => {}
-                    _ => return,
+                let mut head = [0u8; 4];
+                if recv.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                if head == FORWARD_REQUEST {
+                    expose(send, recv).await;
+                    return;
+                }
+                if head != PULL_REQUEST {
+                    return;
                 }
                 let chunk = vec![0u8; CHUNK];
                 let _ = tokio::time::timeout(SERVE_LIMIT, async {
@@ -297,6 +345,176 @@ fn serve(conn: Connection) {
             });
         }
     });
+}
+
+/// Pipes one forwarded stream to the exposed loopback port.
+async fn expose(mut send: SendStream, mut recv: RecvStream) {
+    let port = EXPOSED.load(Ordering::Relaxed);
+    let local = match port {
+        1..=65535 => TcpStream::connect(("127.0.0.1", port as u16)).await.ok(),
+        _ => None,
+    };
+    let Some(local) = local else {
+        count(CARRIED_EXPOSE_FAILED, 1);
+        let _ = send.reset(1u32.into());
+        let _ = recv.stop(1u32.into());
+        return;
+    };
+    count(CARRIED_EXPOSE_STREAMS, 1);
+    pipe(local, send, recv, CARRIED_EXPOSE_SENT, CARRIED_EXPOSE_RECEIVED).await;
+}
+
+/// **Carries one TCP connection over one QUIC stream**, both ways, counting
+/// bytes into `sent` (TCP → QUIC) and `received` (QUIC → TCP).
+///
+/// A clean end in one direction is passed on as a half-close and the other
+/// direction runs to its own end, which is how an HTTP request and its answer
+/// finish. A failure in either direction ends both: the player abandoning a
+/// range closes its socket, and the far side has to stop sending rather than
+/// push the rest of a clip into a stream nobody reads.
+async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream, sent: usize, received: usize) {
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let up = async {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match tcp_read.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = send.finish();
+                    return true;
+                }
+                Ok(n) => {
+                    if send.write_all(&buf[..n]).await.is_err() {
+                        return false;
+                    }
+                    count(sent, n as u64);
+                }
+                Err(_) => {
+                    let _ = send.reset(0u32.into());
+                    return false;
+                }
+            }
+        }
+    };
+    let down = async {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match recv.read(&mut buf).await {
+                Ok(Some(n)) => {
+                    if tcp_write.write_all(&buf[..n]).await.is_err() {
+                        let _ = recv.stop(0u32.into());
+                        return false;
+                    }
+                    count(received, n as u64);
+                }
+                Ok(None) => {
+                    let _ = tcp_write.shutdown().await;
+                    return true;
+                }
+                Err(_) => return false,
+            }
+        }
+    };
+    tokio::pin!(up, down);
+    tokio::select! {
+        clean = &mut up => if clean { down.await; },
+        clean = &mut down => if clean { up.await; },
+    }
+}
+
+/// **Pipes one loopback port on this side to `id_hex`'s exposed port**, and
+/// writes the port into `port_out`.
+///
+/// Binds `127.0.0.1` on a port the system picks — loopback only, so nothing on
+/// the local network can use it — and carries each connection made to it over
+/// its own stream on the held connection. The connection is looked up at each
+/// accept, so a redial is picked up without asking for a new port. Asking again
+/// for the same remote returns the same port.
+///
+/// It forwards bytes, not requests: whatever speaks to the port is speaking to
+/// whatever the other side exposed. (v0.7.0)
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_forward(id_hex: *const c_char, port_out: *mut i32) -> i32 {
+    if endpoint().is_none() {
+        return ERR_NOT_STARTED;
+    }
+    let Some(id) = parse_id(id_hex) else {
+        return ERR_BAD_ID;
+    };
+    if port_out.is_null() {
+        return ERR_BUFFER;
+    }
+    if held(&id).is_none() {
+        return ERR_NO_REMOTE;
+    }
+    let mut forwards = match FORWARDS.lock() {
+        Ok(list) => list,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((_, port, _)) = forwards.iter().find(|(known, _, task)| *known == id && !task.is_finished()) {
+        // SAFETY: non-null, checked above.
+        unsafe { *port_out = *port as i32 };
+        return 0;
+    }
+    let Ok(listener) = runtime().block_on(TcpListener::bind(("127.0.0.1", 0))) else {
+        return ERR_PORT;
+    };
+    let Ok(port) = listener.local_addr().map(|addr| addr.port()) else {
+        return ERR_PORT;
+    };
+    let task = runtime().spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Some(conn) = held(&id).filter(|conn| conn.close_reason().is_none()) else {
+                    count(CARRIED_FORWARD_FAILED, 1);
+                    return;
+                };
+                let Ok((mut send, recv)) = conn.open_bi().await else {
+                    count(CARRIED_FORWARD_FAILED, 1);
+                    return;
+                };
+                if send.write_all(FORWARD_REQUEST).await.is_err() {
+                    count(CARRIED_FORWARD_FAILED, 1);
+                    return;
+                }
+                count(CARRIED_FORWARD_STREAMS, 1);
+                pipe(tcp, send, recv, CARRIED_FORWARD_SENT, CARRIED_FORWARD_RECEIVED).await;
+            });
+        }
+    });
+    forwards.retain(|(known, _, _)| *known != id);
+    forwards.push((id, port, task));
+    // SAFETY: non-null, checked above.
+    unsafe { *port_out = port as i32 };
+    0
+}
+
+/// **Lets remotes reach one loopback port on this side**, through their
+/// `apple_iroh_forward`. Zero exposes nothing, which is where it starts.
+///
+/// Only connections that are held — allowed in, or dialled from here — can
+/// open a stream at all, and only to `127.0.0.1` on this one port: the remote
+/// cannot name a host or choose a port. (v0.7.0)
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_expose(port: i32) -> i32 {
+    if !(0..=65535).contains(&port) {
+        return ERR_PORT;
+    }
+    EXPOSED.store(port, Ordering::Relaxed);
+    0
+}
+
+/// Writes the `CARRIED_*` counters since the endpoint started, and returns
+/// `CARRIED_FIELDS`. (v0.7.0)
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_carried(fields: *mut u64, cap: i32) -> i32 {
+    if fields.is_null() || cap < CARRIED_FIELDS as i32 {
+        return ERR_BUFFER;
+    }
+    for (index, slot) in CARRIED.iter().enumerate() {
+        // SAFETY: non-null with at least CARRIED_FIELDS of room, checked above.
+        unsafe { *fields.add(index) = slot.load(Ordering::Relaxed) };
+    }
+    CARRIED_FIELDS as i32
 }
 
 /// **Times bytes arriving from `id_hex`** for `duration_ms`, and writes how
@@ -605,6 +823,12 @@ pub extern "C" fn apple_iroh_net_report(fields: *mut i32, cap: i32) -> i32 {
 /// than leaving a thread pool behind on every cycle.
 #[unsafe(no_mangle)]
 pub extern "C" fn apple_iroh_stop() {
+    if let Ok(mut forwards) = FORWARDS.lock() {
+        for (_, _, task) in forwards.drain(..) {
+            task.abort();
+        }
+    }
+    EXPOSED.store(0, Ordering::Relaxed);
     if let Ok(mut held) = DIALLED.lock() {
         held.clear();
     }

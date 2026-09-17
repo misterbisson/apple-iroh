@@ -127,6 +127,50 @@ On the Mac that built v0.6.0, polled every second: `0` for the first three
 seconds, then `udp4 1, udp6 0, varies4 0, varies6 -1, public4 1, public6 0,
 captive -1, relay 18271 µs`.
 
+### Carrying a socket (v0.7.0)
+
+`apple_iroh_forward` binds a loopback port on this side and carries each TCP
+connection made to it over its own stream to the remote. `apple_iroh_expose`
+names the one loopback port on the remote that those streams reach. So a
+player on an iPad can ask `http://127.0.0.1:<port>/clip` and be answered by a
+server on the Mac's loopback, with QUIC and a hole punch between them and no
+certificate anywhere.
+
+```c
+int32_t apple_iroh_forward(const char *id_hex, int32_t *port_out);
+int32_t apple_iroh_expose(int32_t port);            /* 0 exposes nothing */
+int32_t apple_iroh_carried(uint64_t *fields, int32_t cap);
+```
+
+**Bytes, not requests.** Nothing here parses what it carries. The remote
+cannot name a host or choose a port: an exposed stream reaches `127.0.0.1` on
+the one port its own side chose, and only connections that got past the allow
+list, or that this side dialled, can open one. Nothing is exposed until
+`apple_iroh_expose` is called, and `apple_iroh_stop` puts it back to nothing.
+
+**`apple_iroh_carried` counts what was carried**: streams opened and failed,
+and bytes each way, for both roles. A player fed from somewhere else looks just
+like one fed over iroh, so an instrument built on this has to show these
+counts.
+
+A clean end in one direction is passed on as a half-close, and the other
+direction runs on to its own end. A failure in either direction ends both, so
+a player that abandons a range stops the far side sending.
+
+Measured between two processes on the Mac that built v0.7.0, through a loopback
+HTTP server:
+
+- a 64,000,000-byte file arrived with the same SHA-256 in 0.81 s, and both
+  sides counted 64,000,205 bytes carried, the body plus response headers;
+- a reader limited to 300 KB/s that gave up after 2 s left the exposing side
+  at 2,687,181 bytes sent, and the count had not moved 4 s later;
+- with nothing listening on the exposed port, each stream was counted as
+  failed on the exposing side.
+
+A forwarded stream opens with `fwd1`, the same length as `pull`. A v0.6.0
+endpoint drops it, and `apple-iroh/probe/1` did not change, so a v0.6.0 and a
+v0.7.0 endpoint still connect and still answer each other's pulls.
+
 ### Timing a pull (v0.4.0)
 
 `apple_iroh_pull` asks a held connection's remote for bytes and counts what

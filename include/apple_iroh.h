@@ -27,6 +27,7 @@ extern "C" {
 #define APPLE_IROH_ERR_BAD_KEY         (-8)
 #define APPLE_IROH_ERR_CLOSED          (-9)
 #define APPLE_IROH_ERR_STREAM          (-10)
+#define APPLE_IROH_ERR_PORT            (-11) /* bad port, or loopback bind failed */
 
 /* A secret key is exactly this many bytes. */
 #define APPLE_IROH_SECRET_KEY_LEN      (32)
@@ -119,7 +120,38 @@ int32_t apple_iroh_pull(const char *id_hex, int32_t duration_ms, int32_t interva
 #define APPLE_IROH_NET_FIELDS     (8)
 int32_t apple_iroh_net_report(int32_t *fields, int32_t cap);
 
-/* Drops every held connection and the endpoint. */
+/* Pipes a loopback port on this side to the remote's exposed port, and writes
+ * the port into port_out. Binds 127.0.0.1 only, on a port the system picks, and
+ * carries each TCP connection made to it over its own stream on the held
+ * connection, looked up at each accept so a redial needs no new port. Asking
+ * again for the same remote returns the same port. Bytes, not requests: whatever
+ * speaks to the port speaks to what the other side exposed. APPLE_IROH_ERR_NO_REMOTE
+ * when no connection is held. (v0.7.0) */
+int32_t apple_iroh_forward(const char *id_hex, int32_t *port_out);
+
+/* Lets held connections reach ONE loopback port on this side through their
+ * apple_iroh_forward: 127.0.0.1 on this port, never a host or port the remote
+ * names. Zero, where it starts and where apple_iroh_stop puts it, exposes
+ * nothing, and a forwarded stream is then refused and counted. (v0.7.0) */
+int32_t apple_iroh_expose(int32_t port);
+
+/* What forwarding has carried since the endpoint started, as APPLE_IROH_CARRIED_FIELDS
+ * uint64 slots at the indices below; returns APPLE_IROH_CARRIED_FIELDS. SENT is
+ * from the local socket to the remote, RECEIVED the other way. An instrument has
+ * to show it was in the path: a player fed from somewhere else looks the same
+ * as one fed over iroh. (v0.7.0) */
+#define APPLE_IROH_CARRIED_FORWARD_STREAMS  (0)
+#define APPLE_IROH_CARRIED_FORWARD_FAILED   (1)
+#define APPLE_IROH_CARRIED_FORWARD_SENT     (2)
+#define APPLE_IROH_CARRIED_FORWARD_RECEIVED (3)
+#define APPLE_IROH_CARRIED_EXPOSE_STREAMS   (4)
+#define APPLE_IROH_CARRIED_EXPOSE_FAILED    (5)
+#define APPLE_IROH_CARRIED_EXPOSE_SENT      (6)
+#define APPLE_IROH_CARRIED_EXPOSE_RECEIVED  (7)
+#define APPLE_IROH_CARRIED_FIELDS           (8)
+int32_t apple_iroh_carried(uint64_t *fields, int32_t cap);
+
+/* Drops every held connection, every forward, the exposed port and the endpoint. */
 void apple_iroh_stop(void);
 
 #ifdef __cplusplus

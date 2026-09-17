@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # already takes to decide how to reach the internet. Unstable upstream, which is
 # one more reason the version is pinned exactly.
 iroh = { version = "=1.2.0", features = ["unstable-net-report"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "net"] }
 
 [profile.release]
 # The consumer is an app binary. Size is the thing being traded for here.
