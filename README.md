@@ -3,15 +3,32 @@
 **[iroh](https://github.com/n0-computer/iroh) as a static library for Apple
 platforms, behind a small C ABI.**
 
-One tagged release publishes `AppleIroh.xcframework.zip` with three slices —
-`ios-arm64`, `ios-arm64_x86_64-simulator`, `macos-arm64_x86_64` — and the header
-to call them. An app fetches the zip, checks the sha256, and links it.
+One tagged release publishes `AppleIroh.xcframework.zip` with five slices —
+`ios-arm64`, `ios-arm64_x86_64-simulator`, `macos-arm64_x86_64`, `tvos-arm64`,
+`tvos-arm64-simulator` — and the header to call them. An app fetches the zip,
+checks the sha256, and links it.
 
-Two of the three are universal, from v0.2.0. Xcode builds a Mac app
+The iOS Simulator and macOS slices are universal, from v0.2.0. Xcode builds a Mac app
 `ARCHS = arm64 x86_64` in Release by default, and the Simulator runs the host's
 architecture, so an arm64-only archive fails at link the first time somebody
 builds Release or opens the Simulator on an Intel Mac. v0.1.1 was arm64-only and
 did exactly that.
+
+**The tvOS slices have run in the Simulator and not on an Apple TV.** They are
+built from two patched crates: `netdev` and `netwatch`, which iroh depends on,
+pick their Apple code by operating system and name only `macos` and `ios`.
+`patch-crates.sh` adds `tvos` beside `ios` in both and says why that is enough.
+
+Run once, on 2026-10-09, between a Mac and the tvOS 27.0 Simulator on that same
+Mac: an endpoint started in the Simulator, dialled the Mac's, moved from the
+relay to a direct path within a second, and pulled a 50 MB file through
+`apple_iroh_forward` with the checksum it was served with. A second dialler the
+Mac had not allowed got nothing, and the Mac counted one refusal. The Simulator
+uses the Mac's own network, so that says the library works when built for tvOS.
+It says nothing about an Apple TV's network. The device slice links against the
+tvOS SDK and has not been run.
+
+The tvOS Simulator slice is arm64 alone, so an Intel Mac cannot link it.
 
 ## Why this is its own repository
 

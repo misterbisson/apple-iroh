@@ -1,0 +1,154 @@
+--- a/netwatch/Cargo.toml
++++ b/netwatch/Cargo.toml
+@@ -159,10 +159,10 @@
+ [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies.netlink-sys]
+ version = "0.8.7"
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-foundation]
++[target.'cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))'.dependencies.objc2-core-foundation]
+ version = "0.3.2"
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-system-configuration]
++[target.'cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))'.dependencies.objc2-system-configuration]
+ version = "0.3.2"
+ 
+ [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies.libc]
+--- a/netwatch/build.rs
++++ b/netwatch/build.rs
+@@ -12,6 +12,6 @@
+         // dependency target gate in Cargo.toml.
+         netdev: { not(any(target_os = "espidf", all(target_family = "wasm", target_os = "unknown"))) },
+         // BSD-derived platforms that share the `AF_ROUTE` routing-socket code.
+-        bsd: { any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "macos", target_os = "ios") },
++        bsd: { any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "macos", target_os = "ios", target_os = "tvos") },
+     }
+ }
+--- a/netwatch/src/interfaces/bsd.rs
++++ b/netwatch/src/interfaces/bsd.rs
+@@ -9,7 +9,7 @@
+ };
+ 
+ use libc::{AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET, c_int, uintptr_t};
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ use libc::{
+     NET_RT_DUMP, RTA_IFP, RTAX_BRD, RTAX_DST, RTAX_GATEWAY, RTAX_MAX, RTAX_NETMASK, RTF_GATEWAY,
+ };
+@@ -32,9 +32,9 @@
+ #[cfg(target_os = "openbsd")]
+ pub(crate) use self::openbsd::*;
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ mod macos;
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ use self::macos::*;
+ 
+ pub async fn default_route() -> Option<DefaultRouteDetails> {
+@@ -117,7 +117,7 @@
+         return false;
+     }
+ 
+-    #[cfg(any(target_os = "macos", target_os = "ios"))]
++    #[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+     if rm.flags & libc::RTF_IFSCOPE as u32 != 0 {
+         return false;
+     }
+@@ -181,7 +181,7 @@
+     }
+ }
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios",))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos"),))]
+ fn fetch_routing_table() -> Option<Vec<u8>> {
+     const NET_RT_DUMP2: i32 = 7;
+     match fetch_rib(libc::AF_UNSPEC, NET_RT_DUMP2, 0) {
+@@ -193,7 +193,7 @@
+     }
+ }
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios",))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos"),))]
+ fn parse_routing_table(rib: &[u8]) -> Option<Vec<RouteMessage>> {
+     match parse_rib(libc::NET_RT_IFLIST2, rib) {
+         Ok(res) => {
+@@ -213,7 +213,7 @@
+     }
+ }
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ const fn is_valid_rib_type(typ: RIBType) -> bool {
+     const NET_RT_STAT: RIBType = 4;
+     const NET_RT_TRASH: RIBType = 5;
+@@ -283,7 +283,7 @@
+                 target_os = "freebsd",
+                 target_os = "netbsd",
+                 target_os = "macos",
+-                target_os = "ios"
++                any(target_os = "ios", target_os = "tvos")
+             ))]
+             MessageType::Route => {
+                 ensure!(data.len() >= self.body_off, RouteError::MessageTooShort);
+@@ -888,14 +888,14 @@
+     //   the routing message boundary
+     let mut l = b[0] as usize;
+ 
+-    #[cfg(any(target_os = "macos", target_os = "ios"))]
++    #[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+     {
+         // On Darwin, an address in the kernel form is also used as a message filler.
+         if l == 0 || b.len() > roundup(l) {
+             l = roundup(l)
+         }
+     }
+-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
++    #[cfg(not(any(target_os = "macos", any(target_os = "ios", target_os = "tvos"))))]
+     {
+         l = roundup(l);
+     }
+@@ -1042,7 +1042,7 @@
+         buf[2] = wrong_version;
+         buf[3] = 0; // arbitrary type
+ 
+-        #[cfg(any(target_os = "macos", target_os = "ios"))]
++        #[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+         let rib_type = libc::NET_RT_IFLIST2;
+         #[cfg(any(target_os = "freebsd", target_os = "netbsd"))]
+         let rib_type = libc::NET_RT_IFLIST;
+@@ -1077,7 +1077,7 @@
+     #[test]
+     #[cfg(target_endian = "little")]
+     fn test_parse_addrs() {
+-        #[cfg(any(target_os = "macos", target_os = "ios"))]
++        #[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+         use libc::{RTA_BRD, RTA_DST, RTA_GATEWAY, RTA_IFA, RTA_IFP, RTA_NETMASK};
+ 
+         let parse_addrs_little_endian_tests = [
+--- a/netwatch/src/netmon/actor.rs
++++ b/netwatch/src/netmon/actor.rs
+@@ -28,11 +28,11 @@
+ }
+ 
+ /// How often we execute a check for big jumps in wall time.
+-#[cfg(not(any(target_os = "ios", target_os = "android")))]
++#[cfg(not(any(any(target_os = "ios", target_os = "tvos"), target_os = "android")))]
+ const POLL_WALL_TIME_INTERVAL: Duration = Duration::from_secs(15);
+ /// Set background polling time to 1h to effectively disable it on mobile,
+ /// to avoid increased battery usage. Sleep detection won't work this way there.
+-#[cfg(any(target_os = "ios", target_os = "android"))]
++#[cfg(any(any(target_os = "ios", target_os = "tvos"), target_os = "android"))]
+ const POLL_WALL_TIME_INTERVAL: Duration = Duration::from_secs(60 * 60);
+ const MON_CHAN_CAPACITY: usize = 16;
+ const ACTOR_CHAN_CAPACITY: usize = 16;
+--- a/netwatch/src/netmon/bsd.rs
++++ b/netwatch/src/netmon/bsd.rs
+@@ -1,6 +1,6 @@
+ use std::ops::ControlFlow;
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ use libc::{RTAX_DST, RTAX_IFP};
+ use n0_error::stack_error;
+ use n0_future::{

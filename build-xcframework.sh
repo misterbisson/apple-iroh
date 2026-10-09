@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds AppleIroh.xcframework — three static slices and a header — and the
+# Builds AppleIroh.xcframework — five static slices and a header — and the
 # zip plus checksum a consumer pins.
 #
 # The same script runs on a laptop and in CI. That is the point: an artifact
@@ -8,11 +8,15 @@
 # auditable, and this repo exists so it is a tagged commit and a public log
 # instead.
 #
-# Needs Rust with the three targets, and Xcode.
+# Needs Rust with the seven targets, and Xcode with the iOS and tvOS SDKs.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# **Five Rust targets, three xcframework slices**, because a slice may be
+# **Two of iroh's dependencies do not name tvOS**, so they are patched before
+# anything is built. `patch-crates.sh` says what the patch is and why.
+./patch-crates.sh
+
+# **Seven Rust targets, five xcframework slices**, because a slice may be
 # universal and a Rust build never is.
 #
 # The consuming Mac app builds `ARCHS = arm64 x86_64` in Release — that is
@@ -26,16 +30,28 @@ cd "$(dirname "$0")"
 # to run the app at all.
 #
 # The device slice is not, and cannot be: there has never been an x86_64 iPhone.
+#
+# **The tvOS Simulator slice is arm64 alone**, unlike the iOS one. The pinned
+# toolchain ships a standard library for `aarch64-apple-tvos` and
+# `aarch64-apple-tvos-sim` and none for `x86_64-apple-tvos`, so that arm would
+# need a nightly compiler building its own. The cost is that an Intel Mac
+# cannot link the Apple TV Simulator. An Apple TV, and an Apple silicon Mac
+# running the Simulator, are both served.
 TARGETS=(
 	aarch64-apple-ios
 	aarch64-apple-ios-sim x86_64-apple-ios
 	aarch64-apple-darwin x86_64-apple-darwin
+	aarch64-apple-tvos
+	aarch64-apple-tvos-sim
 )
 
 # Matched to the consuming app's floors. Raising either is a breaking change
 # for a consumer that has not raised its own, so it is a version bump here.
 IOS_MIN=18.0
 MACOS_MIN=15.0
+# Provisional: set to the iOS floor, because no app links the tvOS slices yet
+# and so there is no floor of its own to match.
+TVOS_MIN=18.0
 
 rm -rf build
 mkdir -p build
@@ -44,6 +60,8 @@ for target in "${TARGETS[@]}"; do
 	printf '%-26s' "$target"
 	case "$target" in
 	*-ios | *-ios-sim) env IPHONEOS_DEPLOYMENT_TARGET="$IOS_MIN" \
+		cargo build --release --target "$target" --lib -q ;;
+	*-tvos | *-tvos-sim) env TVOS_DEPLOYMENT_TARGET="$TVOS_MIN" \
 		cargo build --release --target "$target" --lib -q ;;
 	*) env MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
 		cargo build --release --target "$target" --lib -q ;;
@@ -69,12 +87,14 @@ fat build/fat/macos/libapple_iroh.a \
 	target/aarch64-apple-darwin/release/libapple_iroh.a \
 	target/x86_64-apple-darwin/release/libapple_iroh.a
 
-# One headers directory shared by all three slices. `-create-xcframework`
+# One headers directory shared by all five slices. `-create-xcframework`
 # copies it per slice rather than referencing it, so there is no aliasing here.
 xcodebuild -create-xcframework \
 	-library "target/aarch64-apple-ios/release/libapple_iroh.a" -headers include \
 	-library "build/fat/ios-simulator/libapple_iroh.a" -headers include \
 	-library "build/fat/macos/libapple_iroh.a" -headers include \
+	-library "target/aarch64-apple-tvos/release/libapple_iroh.a" -headers include \
+	-library "target/aarch64-apple-tvos-sim/release/libapple_iroh.a" -headers include \
 	-output build/AppleIroh.xcframework >/dev/null
 
 # **`-create-xcframework` shuffles its own index**, so sort it.
