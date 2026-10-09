@@ -15,7 +15,7 @@
 # release notes say which one built each artifact.
 [toolchain]
 channel = "1.98.1"
-# Five Rust targets, three xcframework slices. The Simulator and macOS slices
+# Seven Rust targets, five xcframework slices. The iOS Simulator and macOS slices
 # are `lipo`d universal because the consuming app builds universal in Release —
 # `ARCHS = arm64 x86_64` — and a Mac app that links an arm64-only archive fails
 # at link on the x86_64 arm, in the Release configuration nobody builds locally.
@@ -26,4 +26,9 @@ targets = [
     "x86_64-apple-ios",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
+    # tvOS, device and Simulator, arm64 only: this toolchain ships no standard
+    # library for `x86_64-apple-tvos`. `build-xcframework.sh` says what that
+    # costs.
+    "aarch64-apple-tvos",
+    "aarch64-apple-tvos-sim",
 ]

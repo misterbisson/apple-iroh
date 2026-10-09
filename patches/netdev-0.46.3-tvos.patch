@@ -1,0 +1,115 @@
+--- a/netdev/Cargo.toml
++++ b/netdev/Cargo.toml
+@@ -114,15 +114,15 @@
+ [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies.netlink-sys]
+ version = "0.9"
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-foundation]
++[target.'cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))'.dependencies.objc2-core-foundation]
+ version = "0.3"
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-system-configuration]
++[target.'cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))'.dependencies.objc2-system-configuration]
+ version = "0.3"
+ features = ["SCNetworkConfiguration"]
+ default-features = false
+ 
+-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.plist]
++[target.'cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))'.dependencies.plist]
+ version = "1.10"
+ 
+ [target.'cfg(target_os = "android")'.dependencies.dlopen2]
+@@ -140,10 +140,10 @@
+ [target.'cfg(target_os = "android")'.dependencies.once_cell]
+ version = "1"
+ 
+-[target.'cfg(target_os = "ios")'.dependencies.block2]
++[target.'cfg(any(target_os = "ios", target_os = "tvos"))'.dependencies.block2]
+ version = "0.6"
+ 
+-[target.'cfg(target_os = "ios")'.dependencies.dispatch2]
++[target.'cfg(any(target_os = "ios", target_os = "tvos"))'.dependencies.dispatch2]
+ version = "0.3"
+ 
+ [target.'cfg(target_os = "macos")'.dependencies.objc2]
+--- a/netdev/src/interface/mod.rs
++++ b/netdev/src/interface/mod.rs
+@@ -103,7 +103,7 @@
+     {
+         crate::os::macos::interface::interfaces()
+     }
+-    #[cfg(target_os = "ios")]
++    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+     {
+         crate::os::ios::interface::interfaces()
+     }
+--- a/netdev/src/os/mod.rs
++++ b/netdev/src/os/mod.rs
+@@ -13,7 +13,7 @@
+ #[cfg(target_os = "macos")]
+ pub mod macos;
+ 
+-#[cfg(target_os = "ios")]
++#[cfg(any(target_os = "ios", target_os = "tvos"))]
+ pub mod ios;
+ 
+ #[cfg(target_os = "windows")]
+--- a/netdev/src/os/unix/dns.rs
++++ b/netdev/src/os/unix/dns.rs
+@@ -2,7 +2,7 @@
+ use std::net::IpAddr;
+ use std::net::ToSocketAddrs;
+ 
+-#[cfg_attr(target_os = "ios", allow(dead_code))]
++#[cfg_attr(any(target_os = "ios", target_os = "tvos"), allow(dead_code))]
+ pub fn get_system_dns_conf() -> Vec<IpAddr> {
+     const PATH_RESOLV_CONF: &str = "/etc/resolv.conf";
+     let r = read_to_string(PATH_RESOLV_CONF);
+--- a/netdev/src/os/unix/interface.rs
++++ b/netdev/src/os/unix/interface.rs
+@@ -190,7 +190,7 @@
+ 
+         #[cfg(any(
+             target_os = "macos",
+-            target_os = "ios",
++            any(target_os = "ios", target_os = "tvos"),
+             target_os = "freebsd",
+             target_os = "openbsd",
+             target_os = "netbsd"
+--- a/netdev/src/os/unix/link_speed.rs
++++ b/netdev/src/os/unix/link_speed.rs
+@@ -1,6 +1,6 @@
+ #![cfg(any(
+     target_os = "macos",
+-    target_os = "ios",
++    any(target_os = "ios", target_os = "tvos"),
+     target_os = "freebsd",
+     target_os = "openbsd",
+     target_os = "netbsd"
+@@ -10,7 +10,7 @@
+ use libc::{AF_INET, IFNAMSIZ, SOCK_DGRAM, close, ioctl, socket};
+ use std::ffi::CString;
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ use macos_subtypes::{ifm_subtype, map_subtype_to_bps};
+ 
+ #[cfg(target_os = "freebsd")]
+@@ -100,7 +100,7 @@
+ // extended types. However, some BSD variants (OpenBSD and NetBSD) don't define SIOCGIFXMEDIA.
+ // This code uses SIOCGIFXMEDIA where available, otherwise SIOCGIFMEDIA.
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ // #define SIOCGIFXMEDIA   _IOWR('i', 72, struct ifmediareq)
+ const SIOCGIFXMEDIA: u64 = 0xc02c6948;
+ // #define SIOCGIFMEDIA    _IOWR('i', 56, struct ifmediareq)
+@@ -162,7 +162,7 @@
+ 
+ // The following constants are different on every BSD variant and macOS
+ 
+-#[cfg(any(target_os = "macos", target_os = "ios"))]
++#[cfg(any(target_os = "macos", any(target_os = "ios", target_os = "tvos")))]
+ mod macos_subtypes {
+     // https://github.com/apple/darwin-xnu/blob/main/bsd/net/if_media.h
+     // MacOSX.sdk/usr/include/net/if_media.h

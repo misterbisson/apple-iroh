@@ -21,6 +21,16 @@ path = "src/lib.rs"
 iroh = { version = "=1.2.0", features = ["unstable-net-report"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "net"] }
 
+# **Two crates under iroh, patched to name tvOS.** Each picks its Apple code by
+# operating system and lists `macos` and `ios` only, so neither compiles for an
+# Apple TV. `patch-crates.sh` fetches each as crates.io published it, checks it
+# against the checksum `Cargo.lock` held, and applies the diff in `patches/`.
+# `patched/` is not in the repository, so run that script (or
+# `build-xcframework.sh`, which runs it) before `cargo` is asked for anything.
+[patch.crates-io]
+netdev = { path = "patched/netdev" }
+netwatch = { path = "patched/netwatch" }
+
 [profile.release]
 # The consumer is an app binary. Size is the thing being traded for here.
 opt-level = "z"
