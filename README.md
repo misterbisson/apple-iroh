@@ -204,6 +204,32 @@ A forwarded stream opens with `fwd1`, the same length as `pull`. A v0.6.0
 endpoint drops it, and `apple-iroh/probe/1` did not change, so a v0.6.0 and a
 v0.7.0 endpoint still connect and still answer each other's pulls.
 
+### Exposing a Unix socket (v0.10.0)
+
+```c
+int32_t apple_iroh_expose_unix(const char *path);   /* NULL or "" exposes nothing */
+```
+
+**A loopback port is open to every process on the device**, not only to the
+remotes this side allowed. On a Mac a server can ask the kernel which process
+holds the other end of a connection and turn the rest away. iOS gives an app
+no way to ask, so a server there can't tell a forwarded stream from another
+app that found its port.
+
+`apple_iroh_expose_unix` pipes forwarded streams to a Unix socket instead. A
+socket is a file, and one in the app's own container is out of other apps'
+reach, so the server behind it hears only from this side. The remote still
+can't name where its stream goes: this side chooses the one socket.
+
+It replaces the exposed port rather than adding to it: setting either clears
+the other, and `apple_iroh_stop` clears both. A stream that finds nothing
+listening is refused and counted, as with a port. `APPLE_IROH_ERR_PATH` is a
+path that isn't UTF-8, or that is longer than the 103 bytes a Unix socket
+address holds, which an app container's path can approach. A short path in
+the container's temporary directory fits.
+
+The forwarding side is unchanged and still binds a loopback port.
+
 ### Timing a pull (v0.4.0)
 
 `apple_iroh_pull` asks a held connection's remote for bytes and counts what
@@ -229,7 +255,7 @@ v0.4.0 endpoint fail to connect rather than connect and never answer a pull.
 ## Consuming it
 
 ```bash
-VERSION=v0.8.0
+VERSION=v0.10.0
 curl -fsSL -O "https://github.com/misterbisson/apple-iroh/releases/download/$VERSION/AppleIroh.xcframework.zip"
 curl -fsSL -O "https://github.com/misterbisson/apple-iroh/releases/download/$VERSION/AppleIroh.xcframework.zip.sha256"
 shasum -a 256 -c <(echo "$(cat AppleIroh.xcframework.zip.sha256)  AppleIroh.xcframework.zip")
