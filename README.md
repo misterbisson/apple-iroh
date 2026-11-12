@@ -230,6 +230,12 @@ the container's temporary directory fits.
 
 The forwarding side is unchanged and still binds a loopback port.
 
+Run on 2026-11-12, with this pull request's CI build, between two processes
+on one Mac: one exposed its HTTP server on a socket, the other forwarded to
+it over a direct path, and a request through the forward got the server's
+answer. The server listened on no loopback port of its own, and the socket
+file was gone once it stopped.
+
 ### Timing a pull (v0.4.0)
 
 `apple_iroh_pull` asks a held connection's remote for bytes and counts what
