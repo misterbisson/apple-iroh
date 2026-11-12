@@ -28,6 +28,7 @@ extern "C" {
 #define APPLE_IROH_ERR_CLOSED          (-9)
 #define APPLE_IROH_ERR_STREAM          (-10)
 #define APPLE_IROH_ERR_PORT            (-11) /* bad port, or loopback bind failed */
+#define APPLE_IROH_ERR_PATH            (-12) /* socket path not UTF-8, or too long */
 
 /* A secret key is exactly this many bytes. */
 #define APPLE_IROH_SECRET_KEY_LEN      (32)
@@ -149,6 +150,17 @@ int32_t apple_iroh_forward(const char *id_hex, int32_t *port_out);
  * nothing, and a forwarded stream is then refused and counted. (v0.7.0) */
 int32_t apple_iroh_expose(int32_t port);
 
+/* Lets held connections reach ONE Unix socket on this side instead of a port,
+ * through their apple_iroh_forward. NULL or "" exposes nothing. Any process on
+ * the device can connect to a loopback port; a socket in the app's own
+ * container is out of other apps' reach, so the server behind it hears only
+ * from this side, which matters where it can't see who connected, as on iOS.
+ * A stream that finds nothing listening is refused and counted, as with a
+ * port. Setting either this or apple_iroh_expose clears the other, and
+ * apple_iroh_stop clears both. APPLE_IROH_ERR_PATH for a path that isn't UTF-8
+ * or is over 103 bytes. (v0.10.0) */
+int32_t apple_iroh_expose_unix(const char *path);
+
 /* What forwarding has carried since the endpoint started, as APPLE_IROH_CARRIED_FIELDS
  * uint64 slots at the indices below; returns APPLE_IROH_CARRIED_FIELDS. SENT is
  * from the local socket to the remote, RECEIVED the other way. An instrument has
@@ -165,7 +177,8 @@ int32_t apple_iroh_expose(int32_t port);
 #define APPLE_IROH_CARRIED_FIELDS           (8)
 int32_t apple_iroh_carried(uint64_t *fields, int32_t cap);
 
-/* Drops every held connection, every forward, the exposed port and the endpoint. */
+/* Drops every held connection, every forward, the exposed port or socket and
+ * the endpoint. */
 void apple_iroh_stop(void);
 
 #ifdef __cplusplus

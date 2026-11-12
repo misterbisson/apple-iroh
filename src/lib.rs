@@ -27,14 +27,15 @@
 //!   different endpoint id.
 
 use std::ffi::{c_char, CStr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -64,6 +65,12 @@ pub const ERR_CLOSED: i32 = -9;
 pub const ERR_STREAM: i32 = -10;
 /// A port outside 0–65535, or a loopback listener that could not be bound.
 pub const ERR_PORT: i32 = -11;
+/// A socket path that is not UTF-8, or too long for a Unix socket address.
+pub const ERR_PATH: i32 = -12;
+
+/// The most bytes a Unix socket path can have on Apple platforms: `sun_path`
+/// is 104 bytes, and the last holds the NUL.
+const UNIX_PATH_MAX: usize = 103;
 
 /// What a dialler writes on a new bidirectional stream to ask for bytes.
 const PULL_REQUEST: &[u8] = b"pull";
@@ -116,6 +123,24 @@ static REFUSED: AtomicI32 = AtomicI32::new(0);
 
 /// The loopback port forwarded streams are piped to; zero exposes nothing.
 static EXPOSED: AtomicI32 = AtomicI32::new(0);
+
+/// The Unix socket forwarded streams are piped to instead, when one is set
+/// (v0.10.0). Setting either target clears the other, so there is one.
+static EXPOSED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn exposed_path() -> Option<PathBuf> {
+    match EXPOSED_PATH.lock() {
+        Ok(path) => path.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn set_exposed_path(path: Option<PathBuf>) {
+    match EXPOSED_PATH.lock() {
+        Ok(mut slot) => *slot = path,
+        Err(poisoned) => *poisoned.into_inner() = path,
+    }
+}
 
 /// Loopback listeners this side opened with `apple_iroh_forward`, one per
 /// remote, so asking again hands back the same port.
@@ -317,7 +342,7 @@ fn held(id: &EndpointId) -> Option<Connection> {
 /// can compress them.
 ///
 /// A forward is a stream opening with `fwd1`, piped both ways to the loopback
-/// port this side exposed, or dropped when it exposed none.
+/// port or Unix socket this side exposed, or dropped when it exposed none.
 ///
 /// Both ends serve, so either can time the other direction. Only connections
 /// that got past the allow list, or that this side dialled, are ever held.
@@ -347,37 +372,53 @@ fn serve(conn: Connection) {
     });
 }
 
-/// Pipes one forwarded stream to the exposed loopback port.
-async fn expose(mut send: SendStream, mut recv: RecvStream) {
+/// Pipes one forwarded stream to the exposed Unix socket or loopback port.
+async fn expose(send: SendStream, recv: RecvStream) {
+    if let Some(path) = exposed_path() {
+        match UnixStream::connect(&path).await {
+            Ok(local) => {
+                count(CARRIED_EXPOSE_STREAMS, 1);
+                pipe(local, send, recv, CARRIED_EXPOSE_SENT, CARRIED_EXPOSE_RECEIVED).await;
+            }
+            Err(_) => refuse(send, recv),
+        }
+        return;
+    }
     let port = EXPOSED.load(Ordering::Relaxed);
     let local = match port {
         1..=65535 => TcpStream::connect(("127.0.0.1", port as u16)).await.ok(),
         _ => None,
     };
     let Some(local) = local else {
-        count(CARRIED_EXPOSE_FAILED, 1);
-        let _ = send.reset(1u32.into());
-        let _ = recv.stop(1u32.into());
+        refuse(send, recv);
         return;
     };
     count(CARRIED_EXPOSE_STREAMS, 1);
     pipe(local, send, recv, CARRIED_EXPOSE_SENT, CARRIED_EXPOSE_RECEIVED).await;
 }
 
-/// **Carries one TCP connection over one QUIC stream**, both ways, counting
-/// bytes into `sent` (TCP → QUIC) and `received` (QUIC → TCP).
+/// Ends a forwarded stream that has nowhere to go, and counts it.
+fn refuse(mut send: SendStream, mut recv: RecvStream) {
+    count(CARRIED_EXPOSE_FAILED, 1);
+    let _ = send.reset(1u32.into());
+    let _ = recv.stop(1u32.into());
+}
+
+/// **Carries one local connection over one QUIC stream**, both ways, counting
+/// bytes into `sent` (local → QUIC) and `received` (QUIC → local). The local
+/// end is a TCP connection or, on the exposing side, a Unix socket.
 ///
 /// A clean end in one direction is passed on as a half-close and the other
 /// direction runs to its own end, which is how an HTTP request and its answer
 /// finish. A failure in either direction ends both: the player abandoning a
 /// range closes its socket, and the far side has to stop sending rather than
 /// push the rest of a clip into a stream nobody reads.
-async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream, sent: usize, received: usize) {
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+async fn pipe<S: AsyncRead + AsyncWrite>(local: S, mut send: SendStream, mut recv: RecvStream, sent: usize, received: usize) {
+    let (mut local_read, mut local_write) = tokio::io::split(local);
     let up = async {
         let mut buf = vec![0u8; CHUNK];
         loop {
-            match tcp_read.read(&mut buf).await {
+            match local_read.read(&mut buf).await {
                 Ok(0) => {
                     let _ = send.finish();
                     return true;
@@ -400,14 +441,14 @@ async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream, sent: 
         loop {
             match recv.read(&mut buf).await {
                 Ok(Some(n)) => {
-                    if tcp_write.write_all(&buf[..n]).await.is_err() {
+                    if local_write.write_all(&buf[..n]).await.is_err() {
                         let _ = recv.stop(0u32.into());
                         return false;
                     }
                     count(received, n as u64);
                 }
                 Ok(None) => {
-                    let _ = tcp_write.shutdown().await;
+                    let _ = local_write.shutdown().await;
                     return true;
                 }
                 Err(_) => return false,
@@ -494,12 +535,48 @@ pub extern "C" fn apple_iroh_forward(id_hex: *const c_char, port_out: *mut i32) 
 /// Only connections that are held — allowed in, or dialled from here — can
 /// open a stream at all, and only to `127.0.0.1` on this one port: the remote
 /// cannot name a host or choose a port. (v0.7.0)
+///
+/// Clears a socket set with `apple_iroh_expose_unix`. (v0.10.0)
 #[unsafe(no_mangle)]
 pub extern "C" fn apple_iroh_expose(port: i32) -> i32 {
     if !(0..=65535).contains(&port) {
         return ERR_PORT;
     }
+    set_exposed_path(None);
     EXPOSED.store(port, Ordering::Relaxed);
+    0
+}
+
+/// **Lets remotes reach one Unix socket on this side** instead of a loopback
+/// port. Null or empty exposes nothing. (v0.10.0)
+///
+/// Any process on the device can connect to a loopback port, so a server
+/// behind `apple_iroh_expose` is open to every other app here as well as to
+/// the remotes this side allowed. A Unix socket is a file: in an app's own
+/// container, the sandbox keeps other apps from reaching it, and the server
+/// behind it hears only from this side. That matters most where a server
+/// can't see which process connected, as on iOS.
+///
+/// The socket isn't checked here: a stream that finds nothing listening is
+/// refused and counted, as with a port. Clears a port set with
+/// `apple_iroh_expose`. `ERR_PATH` for a path that isn't UTF-8 or is longer
+/// than 103 bytes, the most a Unix socket address holds.
+#[unsafe(no_mangle)]
+pub extern "C" fn apple_iroh_expose_unix(path: *const c_char) -> i32 {
+    let path = if path.is_null() {
+        None
+    } else {
+        // SAFETY: non-null, and the caller passes a NUL-terminated string.
+        let Ok(text) = unsafe { CStr::from_ptr(path) }.to_str() else {
+            return ERR_PATH;
+        };
+        if text.len() > UNIX_PATH_MAX {
+            return ERR_PATH;
+        }
+        (!text.is_empty()).then(|| PathBuf::from(text))
+    };
+    EXPOSED.store(0, Ordering::Relaxed);
+    set_exposed_path(path);
     0
 }
 
@@ -949,6 +1026,7 @@ pub extern "C" fn apple_iroh_stop() {
         }
     }
     EXPOSED.store(0, Ordering::Relaxed);
+    set_exposed_path(None);
     if let Ok(mut held) = DIALLED.lock() {
         held.clear();
     }
